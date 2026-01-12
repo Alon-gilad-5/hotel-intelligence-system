@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "brightdata": {
+      "command": "npx.cmd",
+      "args": ["-y", "@brightdata/mcp"],
+      "env": {
+        "API_TOKEN": "${BRIGHTDATA_API_TOKEN}",
+        "PRO_MODE": "true",
+        "GROUPS": "browser,business",
+        "BROWSER_AUTH": "${BROWSER_AUTH}"
+      }
+    }
+  }
+}
