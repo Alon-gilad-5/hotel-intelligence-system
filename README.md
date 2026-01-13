@@ -71,16 +71,26 @@ The system includes four specialized agents, each with distinct responsibilities
 - Searches internal database (Booking.com and Airbnb reviews)
 - Scrapes live Google Maps reviews using Playwright
 - Scrapes live TripAdvisor reviews using Playwright
-- Falls back to general web search (DuckDuckGo) when needed
+- **Google Search via Bright Data MCP** (premium, real Google results)
+- Falls back to DuckDuckGo web search when needed
 - Analyzes sentiment for specific topics (wifi, cleanliness, noise, etc.)
+- **Anti-hallucination safeguards**: Only quotes verbatim from tool outputs
 
 **Tools**:
 - `search_booking_reviews`: Query internal Booking.com review database
 - `search_airbnb_reviews`: Query internal Airbnb review database
 - `scrape_google_maps_reviews`: Live scraping of Google Maps reviews (FREE)
 - `scrape_tripadvisor_reviews`: Live scraping of TripAdvisor reviews (FREE)
-- `search_web_free`: DuckDuckGo web search fallback
+- `search_web_google`: **NEW** - Google search via Bright Data MCP (PAID)
+- `search_web_free`: DuckDuckGo web search fallback (FREE)
 - `analyze_sentiment_topics`: LLM-powered sentiment analysis
+
+**Anti-Hallucination Design**:
+The Review Analyst uses a strict citation-required prompt that:
+- Only allows claims that appear VERBATIM in tool outputs
+- Requires quoting exact text with source attribution
+- Explicitly reports when topics are NOT found in any source
+- Distinguishes between amenity listings and actual guest feedback
 
 **Example Queries**:
 - "What are guests saying about wifi quality?"
@@ -184,12 +194,40 @@ The `find_competitors_ml()` function in `competitor_analyst.py` serves as a blac
 ### Core Features
 
 1. **Intelligent Query Routing**: Automatically routes user queries to the most appropriate specialist agent
-2. **Stateful Conversations**: Maintains context across multiple turns with hybrid memory
-3. **Entity Extraction**: Automatically identifies and tracks hotels, metrics, competitors, locations, and topics
-4. **Multi-Source Data**: Integrates Booking.com, Airbnb, Google Maps, TripAdvisor, and web search
-5. **LLM Fallback**: Automatic failover from Gemini to Groq/Llama-3 on quota errors
-6. **Tool Calling**: All agents support function calling for data retrieval and analysis
-7. **Real-Time Scraping**: Live data extraction from Google Maps and TripAdvisor using Playwright
+2. **Multi-Agent Collaboration**: Complex queries trigger sequential execution of multiple agents with result aggregation
+3. **Stateful Conversations**: Maintains context across multiple turns with hybrid memory
+4. **Entity Extraction**: Automatically identifies and tracks hotels, metrics, competitors, locations, and topics
+5. **Multi-Source Data**: Integrates Booking.com, Airbnb, Google Maps, TripAdvisor, and web search
+6. **LLM Fallback**: Automatic failover from Gemini to Groq/Llama-3 on quota errors
+7. **Tool Calling**: All agents support function calling for data retrieval and analysis
+8. **Real-Time Scraping**: Live data extraction from Google Maps and TripAdvisor using Playwright
+
+### Multi-Agent Collaboration
+
+For complex queries that require data from multiple sources, the system automatically triggers a multi-agent workflow:
+
+**Example Query:** "How clean are rooms compared to competitors?"
+
+**Workflow:**
+```
+competitor_analyst → review_analyst → benchmark_agent → aggregate_results
+```
+
+| Step | Agent | Action |
+|------|-------|--------|
+| 1 | `competitor_analyst` | Finds 5 London competitors with ratings |
+| 2 | `review_analyst` | Searches cleanliness reviews for each competitor |
+| 3 | `benchmark_agent` | Compares cleanliness metrics across hotels |
+| 4 | `aggregate` | LLM synthesizes findings into coherent response |
+
+**Multi-Agent Routing Patterns:**
+| Query Pattern | Agents Triggered |
+|---------------|------------------|
+| "Compare [topic] with competitors" | competitor_analyst → review_analyst → benchmark_agent |
+| "Compare metrics with competitors" | competitor_analyst → benchmark_agent |
+| "Market analysis with comparison" | market_intel → benchmark_agent |
+
+The coordinator maintains an `agent_queue` in state and executes agents sequentially, passing intermediate results to each subsequent agent.
 
 ### Technical Features
 
@@ -236,12 +274,19 @@ Create a `.env` file in the root directory:
 GOOGLE_API_KEY=your_gemini_api_key
 PINECONE_API_KEY=your_pinecone_api_key
 
-# Optional (for fallback)
+# Optional (for fallback LLM)
 GROQ_API_KEY=your_groq_api_key
 
-# Optional (for paid scraping)
+# Optional (for Bright Data MCP - Google search & scraping)
 BRIGHTDATA_API_TOKEN=your_brightdata_token
+BROWSER_AUTH=your_browser_auth_if_needed
 ```
+
+**Getting Bright Data API Token:**
+1. Go to https://brightdata.com/cp/
+2. Navigate to Settings → API tokens
+3. Create a new token with permissions for SERP API and Web Scraper
+4. Copy the token to your `.env` file
 
 ### Step 5: Install Additional Tools (Optional)
 
@@ -252,9 +297,16 @@ pip install ddgs
 pip install duckduckgo-search
 ```
 
-For BrightData MCP (paid scraping):
+For Bright Data integration:
 ```bash
+# MCP server (requires Node.js)
 npm install -g @brightdata/mcp
+
+# LangChain integration
+pip install langchain-brightdata
+
+# MCP Python client
+pip install mcp
 ```
 
 ## Usage
@@ -276,7 +328,7 @@ HOTEL INTELLIGENCE SYSTEM
 LangGraph Architecture with Hybrid Memory
 ================================================
 
-Context: Renaissance Johor Bahru Hotel in Johor Bahru
+Context: Malmaison London in London
 Type 'q' to quit, 'state' to see current state.
 
 You: What are guests saying about wifi quality?
@@ -287,10 +339,20 @@ You: What are guests saying about wifi quality?
 
 Agent: Based on the reviews, guests have mixed feedback about wifi...
 
-You: How does my rating compare to competitors?
-[Graph] Extracted entities: {'metrics': ['rating'], 'topics': ['competitor_analysis']}
-[Graph] Routing to: benchmark_agent
-...
+You: How clean are rooms compared to competitors?
+[Graph] Multi-agent workflow: competitor_analyst → review_analyst → benchmark_agent
+[competitor_analyst] Executing...
+   >>> Tool Output: === Geographic Competitors in London (5 found) ===
+   1. Bedford Hotel (Rating: 8.0)
+   2. Grand Hotel Bellevue London (Rating: 8.2)
+   ...
+[review_analyst] Executing...
+   >>> Tool Output: Reviews for cleanliness...
+[benchmark_agent] Executing...
+   >>> Tool Output: === Cleanliness Comparison ===
+[Graph] Aggregating results from 3 agents...
+
+Agent: Based on my analysis of 5 London competitors...
 ```
 
 ### Programmatic Usage
@@ -300,9 +362,9 @@ from agents.coordinator import LangGraphCoordinator
 
 # Initialize coordinator
 coordinator = LangGraphCoordinator(
-    hotel_id="BKG_12345",
-    hotel_name="Renaissance Johor Bahru Hotel",
-    city="Johor Bahru"
+    hotel_id="BKG_177691",
+    hotel_name="Malmaison London",
+    city="London"
 )
 
 # Get initial state
@@ -322,6 +384,33 @@ print(response)
 - `state`: View current conversation state (turn count, recent turns, summary, entities)
 - `context`: View formatted context that would be passed to agents
 - `q` / `quit` / `exit`: Exit the chat session
+
+### Running Tests
+
+Test scripts are located in `agents/Tests/`:
+
+```bash
+# Test all agents (11 tests) - initialization, tools, validation, multi-agent
+python agents/Tests/test_all_agents.py
+
+# Test LangGraph integration (9 tests) - state, memory, routing
+python agents/Tests/LangGraph_Test
+
+# Check RAG database contents
+python agents/Tests/check_rag.py
+
+# Test web search tools
+python agents/Tests/test_web_search.py
+
+# Test Bright Data MCP integration
+python agents/Tests/test_bright_data_mcp.py
+```
+
+**Test Coverage:**
+| Test Suite | Tests | What's Tested |
+|------------|-------|---------------|
+| `test_all_agents.py` | 11 | Agent init, anti-hallucination prompts, tools, validation, multi-agent state |
+| `LangGraph_Test` | 9 | Graph state, entity extraction, memory, routing, compression |
 
 ## Data Ingestion
 
@@ -362,9 +451,32 @@ python ingestion.py
 ### Customizing Ingestion
 
 Edit `ingestion.py` to modify:
-- Sample size: `sample_size=5` parameter
+- Sample size: `sample_size=500` parameter (how many hotels to ingest)
+- City filter: `city_filter="London"` (focus on a specific city for competitor analysis)
+- Clear existing: `clear_existing=True` (wipe Pinecone before re-ingesting)
 - Data paths: `booking_path` and `airbnb_path`
 - Index name: `index_name="booking-agent"`
+
+**City-Focused Ingestion Example:**
+```python
+run_ingestion(
+    booking_path="data/sampled_booking_data.parquet",
+    airbnb_path="data/sampled_airbnb_data.parquet",
+    index_name="booking-agent",
+    sample_size=500,
+    city_filter="London",  # Only ingest London hotels
+    clear_existing=True    # Clear old data first
+)
+```
+
+**Available Cities in Dataset:**
+| City | Hotels | Notes |
+|------|--------|-------|
+| London | 332 | Best for testing |
+| Rome | 315 | |
+| Paris | 290 | |
+| Tokyo | 181 | |
+| Kuala Lumpur | 120 | |
 
 ## Project Structure
 
@@ -374,14 +486,27 @@ Agent_Pipeline_Testing/
 ├── agents/
 │   ├── __init__.py
 │   ├── base_agent.py           # Base class with LLM fallback and RAG utilities
-│   ├── coordinator.py           # LangGraph coordinator (main entry point)
-│   ├── graph_state.py           # State schema and memory configuration
+│   ├── coordinator.py          # LangGraph coordinator (main entry point)
+│   ├── graph_state.py          # State schema and memory configuration
 │   ├── entity_extractor.py     # Entity extraction (LLM + regex)
 │   ├── memory_manager.py       # Hybrid memory management
 │   ├── review_analyst.py       # Review analysis agent
 │   ├── competitor_analyst.py   # Competitor identification agent
 │   ├── market_intel.py         # Market intelligence agent
-│   └── benchmark_agent.py      # Benchmarking agent
+│   ├── benchmark_agent.py      # Benchmarking agent
+│   │
+│   ├── utils/                  # Utility modules
+│   │   ├── __init__.py
+│   │   ├── bright_data.py      # Bright Data MCP integration for Google search
+│   │   └── output_validator.py # Structured output validation to catch hallucinations
+│   │
+│   └── Tests/                  # Test scripts
+│       ├── __init__.py
+│       ├── test_all_agents.py  # All agents test suite (11 tests)
+│       ├── LangGraph_Test      # LangGraph integration tests (9 tests)
+│       ├── check_rag.py        # RAG database verification
+│       ├── test_web_search.py  # Web search tool testing
+│       └── test_bright_data_mcp.py  # Bright Data MCP testing
 │
 ├── data/
 │   ├── sampled_booking_data.parquet    # Booking.com dataset
@@ -499,7 +624,10 @@ This demonstrates:
 
 ### Paid Services
 - **Pinecone**: Free tier (1 index, limited storage), paid plans available
-- **BrightData**: Paid scraping service (use sparingly)
+- **Bright Data MCP**: Paid scraping service with multiple tools:
+  - SERP API: ~$2.70 per 1,000 searches
+  - Web Scraper: ~$3-5 per 1,000 pages
+  - Browser zones for anti-bot bypass
 
 ### Recommendations
 - Start with free tier for all services
@@ -508,6 +636,109 @@ This demonstrates:
 - Only use BrightData for complex scraping needs
 
 ## Advanced Features
+
+### Bright Data MCP Integration
+
+The system integrates with Bright Data's MCP (Model Context Protocol) server for premium web scraping capabilities:
+
+**Available MCP Tools:**
+- `scrape_as_markdown`: Scrape any webpage as markdown
+- `search_engine`: Google search results
+- `web_data_google_maps_reviews`: Google Maps reviews
+- `web_data_booking_hotel_listings`: Booking.com data
+
+**Configuration** (`mcp.json`):
+```json
+{
+  "mcpServers": {
+    "brightdata": {
+      "command": "npx.cmd",
+      "args": ["-y", "@brightdata/mcp"],
+      "env": {
+        "API_TOKEN": "${BRIGHTDATA_API_TOKEN}",
+        "PRO_MODE": "true",
+        "GROUPS": "browser,business"
+      }
+    }
+  }
+}
+```
+
+**Usage in Code** (`agents/utils/bright_data.py`):
+```python
+from agents.utils.bright_data import search_google_serp
+
+result = search_google_serp("hotel wifi reviews")
+if result["success"]:
+    for r in result["results"]:
+        print(f"{r['title']}: {r['snippet']}")
+```
+
+### Anti-Hallucination Design
+
+**All agents** implement strict safeguards against LLM hallucinations through:
+
+**1. Citation-Required Prompts (All Agents):**
+
+Each specialist agent has anti-hallucination rules in their system prompt:
+
+| Agent | Key Rules |
+|-------|-----------|
+| **Review Analyst** | Quote exact text, cite sources, report when topics not found |
+| **Competitor Analyst** | Only list competitors from tool outputs, never make up names/ratings |
+| **Market Intel** | Quote scraped content directly, say "Could not retrieve" on failures |
+| **Benchmark Agent** | Report exact numbers, N/A stays N/A, rankings from actual data only |
+
+**2. Structured Output Validation (`agents/utils/output_validator.py`):**
+
+The system includes automated validation that checks agent responses against tool outputs:
+
+```python
+from agents.utils.output_validator import validate_response
+
+# Validate a response
+result = validate_response(
+    response="Guests say wifi is slow...",
+    tool_outputs=["Review 1: Great location", "Review 2: Nice breakfast"],
+    strict=False
+)
+
+print(f"Hallucination Risk: {result.hallucination_risk:.0%}")
+print(f"Warnings: {result.warnings}")
+print(f"Valid: {result.is_valid}")
+```
+
+**Validation Features:**
+- **Pattern Detection**: Catches phrases like "guests say...", "many reviewers mention..." without supporting data
+- **Quote Verification**: Validates that quoted text exists in tool outputs
+- **Numeric Claim Checking**: Verifies ratings/prices against actual tool data
+- **Risk Scoring**: 0-1 hallucination risk score with configurable thresholds
+
+**3. Agent-Level Validation:**
+
+```python
+# Enable validation when creating agents
+agent = ReviewAnalystAgent(
+    hotel_id="BKG_177691",
+    hotel_name="Malmaison London",
+    city="London",
+    validate_output=True,      # Enable validation (default: True)
+    strict_validation=False    # Strict mode appends warnings to high-risk responses
+)
+
+# Get validation result alongside response
+response, validation = agent.run("What do guests say about wifi?", return_validation=True)
+print(f"Risk: {validation.hallucination_risk:.0%}")
+```
+
+**4. Example Good Response:**
+```
+From TripAdvisor: "Warm service but poor wifi" 
+(https://www.tripadvisor.com/ShowUserReviews-...)
+
+I found 1 review mentioning wifi. The guest reported poor wifi quality.
+No other sources mentioned wifi signal strength.
+```
 
 ### Custom ML Model Integration
 

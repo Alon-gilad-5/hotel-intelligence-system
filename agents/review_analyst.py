@@ -8,6 +8,7 @@ Can search internal DB (RAG) OR scrape live Google Maps data.
 import urllib.parse
 from typing import Optional
 from agents.base_agent import BaseAgent
+from agents.utils.bright_data import search_google_serp, format_serp_results
 
 
 class ReviewAnalystAgent(BaseAgent):
@@ -16,34 +17,42 @@ class ReviewAnalystAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         return f"""You are a Review Analyst for {self.hotel_name} in {self.city}.
 
-    Your job is to analyze guest feedback.
-    You have access to a hierarchy of data sources.
+STRICT RULES - NO HALLUCINATIONS:
+1. ONLY state facts that appear EXACTLY in tool outputs.
+2. ALWAYS quote the exact text from tool results when making claims.
+3. If the topic is NOT in any tool output, say: "No information found about [topic]."
+4. NEVER make up or assume guest opinions.
 
-    STRATEGY (Follow this order strictly):
-    1. **Internal DB**: Check `search_booking_reviews` AND `search_airbnb_reviews`.
-    2. **Specialized Scrapers**: 
-       - IF internal DB fails, you MUST try `scrape_google_maps_reviews`.
-       - IF that fails, you MUST try `scrape_tripadvisor_reviews`.
-    3. **General Web Search**: Use `search_web_free` ONLY if all specialized scrapers fail.
+RESPONSE FORMAT:
+- Quote exact text: "From [source]: '[exact quote]'"
+- Include URL when available
+- If nothing found: "I searched [X] sources but found no reviews about [topic]."
 
-    CRITICAL INSTRUCTIONS:
-    - If you use ANY external tool, READ the text returned yourself.
-    - DO NOT use 'analyze_sentiment_topics' on external text.
-    - If one scraper fails (e.g., Google Maps), DO NOT STOP. Try the next one (TripAdvisor).
+TOOL ORDER:
+1. search_booking_reviews - YOUR hotel's internal reviews
+2. search_airbnb_reviews - YOUR hotel's internal reviews
+3. search_competitor_reviews - Use when you have competitor hotel IDs (from previous agent results)
+4. search_web_free - web search (use if internal DB has no relevant info)
 
-    Hotel context:
-    - Hotel ID: {self.hotel_id}
-    - Hotel Name: {self.hotel_name}
-    - City: {self.city}
-    """
+MULTI-AGENT CONTEXT:
+If you receive "[Results from Previous Agents]" with competitor hotel IDs (like BKG_123 or ABB_456),
+use search_competitor_reviews to get reviews for EACH competitor hotel ID mentioned.
+This is critical for comparison queries.
+
+Stop after finding relevant data. Do not call unnecessary tools.
+
+Hotel: {self.hotel_name} (ID: {self.hotel_id}) in {self.city}
+"""
 
     def get_tools(self) -> list:
         return [
             self.search_booking_reviews,
             self.search_airbnb_reviews,
+            self.search_competitor_reviews,  # NEW: Search reviews for any hotel by ID
             self.scrape_google_maps_reviews,
             self.scrape_tripadvisor_reviews,
-            self.search_web_free,
+            self.search_web_google,  # Bright Data SERP API (preferred)
+            self.search_web_free,    # DuckDuckGo fallback (free)
             self.analyze_sentiment_topics,
         ]
 
@@ -84,6 +93,50 @@ class ReviewAnalystAgent(BaseAgent):
             return "No Airbnb reviews found in internal database."
 
         output = f"=== Airbnb Reviews ({len(docs)} found) ===\n\n"
+        for i, doc in enumerate(docs, 1):
+            output += f"[{i}] {doc.page_content}\n\n"
+
+        return output
+
+    def search_competitor_reviews(self, hotel_id: str, query: str, k: int = 3) -> str:
+        """
+        Search reviews for a SPECIFIC hotel by ID (competitor or any hotel).
+        Use this when you have competitor hotel IDs from previous agent results.
+        
+        Args:
+            hotel_id: The hotel ID to search (e.g., "BKG_123456" or "ABB_789")
+            query: Topic to search for in reviews (e.g., "cleanliness", "wifi")
+            k: Number of reviews to return
+        """
+        # Determine namespace from hotel_id prefix
+        if hotel_id.startswith("BKG_"):
+            namespace = "booking_reviews"
+        elif hotel_id.startswith("ABB_"):
+            namespace = "airbnb_reviews"
+        else:
+            # Try both
+            namespace = "booking_reviews"
+        
+        docs = self.search_rag(
+            query,
+            namespace=namespace,
+            k=k,
+            filter_dict={"hotel_id": hotel_id}
+        )
+        
+        # If no results in booking, try airbnb
+        if not docs and not hotel_id.startswith("BKG_"):
+            docs = self.search_rag(
+                query,
+                namespace="airbnb_reviews",
+                k=k,
+                filter_dict={"hotel_id": hotel_id}
+            )
+
+        if not docs:
+            return f"No reviews found for hotel {hotel_id} about '{query}'."
+
+        output = f"=== Reviews for {hotel_id} about '{query}' ({len(docs)} found) ===\n\n"
         for i, doc in enumerate(docs, 1):
             output += f"[{i}] {doc.page_content}\n\n"
 
@@ -135,16 +188,19 @@ Provide:
         """
         Scrape LIVE Google Maps reviews using Playwright.
         Use this if internal database searches fail.
+        Note: Always searches for hotel name to find the place, topic is used for context only.
         """
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             return "Error: Playwright not installed. Run: pip install playwright && playwright install chromium"
 
-        search_query = query or self.hotel_name
+        # Always search for hotel name to find the correct place
+        search_query = self.hotel_name
+        topic = query  # Keep track of what we're looking for
         # Build the Google Maps URL
         url = f"https://www.google.com/maps/search/{urllib.parse.quote(search_query)}"
-        print(f"[ReviewAnalyst] 🌍 Scraping Google Maps: {search_query}...")
+        print(f"[ReviewAnalyst] Scraping Google Maps: {search_query} (looking for: {topic})...")
 
         try:
             with sync_playwright() as p:
@@ -224,14 +280,18 @@ Provide:
     def scrape_tripadvisor_reviews(self, query: Optional[str] = None) -> str:
         """
         Scrape LIVE TripAdvisor reviews using Playwright.
+        Note: Always searches for hotel name only (not the specific query) to find the hotel page.
         """
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             return "Error: Playwright not installed."
 
-        search_query = query or self.hotel_name
-        print(f"[ReviewAnalyst] 🦉 Scraping TripAdvisor: {search_query}...")
+        # IMPORTANT: Always search for hotel name only to find the main page
+        # The specific topic (wifi, etc.) is used to filter results later
+        search_query = self.hotel_name
+        topic_filter = query.lower() if query else None
+        print(f"[ReviewAnalyst] Scraping TripAdvisor: {search_query} (topic: {topic_filter})...")
 
         try:
             with sync_playwright() as p:
@@ -245,8 +305,8 @@ Provide:
                 page = context.new_page()
 
                 # 1. Search via DuckDuckGo to find the direct TripAdvisor link
-                # (Bypassing TripAdvisor's internal search bar which is often buggy for bots)
-                ddg_url = f"https://duckduckgo.com/?q={urllib.parse.quote('site:tripadvisor.com ' + search_query)}"
+                # Search for hotel name + "reviews" to find review pages
+                ddg_url = f"https://duckduckgo.com/?q={urllib.parse.quote('site:tripadvisor.com ' + search_query + ' reviews')}"
                 page.goto(ddg_url, wait_until="domcontentloaded", timeout=30000)
 
                 # 2. Click the first TripAdvisor result
@@ -311,10 +371,49 @@ Provide:
         except Exception as e:
             return f"TripAdvisor Scraping Error: {e}"
 
+    def search_web_google(self, query: str) -> str:
+        """
+        Search Google using Bright Data's SERP API (PREFERRED).
+        Returns real Google search results with review snippets.
+        Use this before search_web_free for better results.
+        """
+        print(f"[ReviewAnalyst] Searching Google (Bright Data SERP)...")
+        
+        # Extract topic keywords to prioritize relevant results
+        topic_words = []
+        important_keywords = ['wifi', 'internet', 'signal', 'connection', 'speed', 'noise', 
+                             'clean', 'breakfast', 'staff', 'service', 'parking', 'pool',
+                             'location', 'bed', 'room', 'bathroom', 'air conditioning', 'ac']
+        query_lower = query.lower()
+        for word in important_keywords:
+            if word in query_lower:
+                topic_words.append(word)
+        
+        topic_str = ' '.join(topic_words) if topic_words else 'review'
+        
+        # Build search query - hotel name + topic + review context
+        search_query = f"{self.hotel_name} {topic_str} review"
+        print(f"   - Query: {search_query}")
+        
+        # Call Bright Data SERP API
+        result = search_google_serp(search_query, num_results=10)
+        
+        if not result["success"]:
+            error_msg = result.get("error", "Unknown error")
+            print(f"   - Bright Data error: {error_msg}")
+            return f"Google search failed: {error_msg}. Try search_web_free as fallback."
+        
+        if not result["results"]:
+            return "Google search returned no results. Try search_web_free as fallback."
+        
+        # Format results, prioritizing those with topic keywords
+        output = format_serp_results(result["results"], topic_keywords=topic_words)
+        return output
+
     def search_web_free(self, query: str) -> str:
         """
         Fallback: Search the web using the 'ddgs' library.
-        Bypasses CAPTCHAs and handles the new package name.
+        Searches multiple review sites for guest feedback.
         """
         # 1. Robust Import
         try:
@@ -325,19 +424,30 @@ Provide:
             except ImportError:
                 return "Error: 'ddgs' package not installed."
 
-        print(f"[ReviewAnalyst] 🔍 Searching Web (DDGS)...")
+        print(f"[ReviewAnalyst] Searching Web (DDGS)...")
 
-        # 2. Strategy: Try specific query first, then broad
-        # We search for "wifi" specifically, not just "wifi signal" to get more hits
-        clean_query = query.replace(self.hotel_name, "").replace("signal", "").strip()
+        # 2. Extract topic keywords from query
+        # Keep important words like "wifi", "signal", "internet", etc.
+        topic_words = []
+        important_keywords = ['wifi', 'internet', 'signal', 'connection', 'speed', 'noise', 
+                             'clean', 'breakfast', 'staff', 'service', 'parking', 'pool',
+                             'location', 'bed', 'room', 'bathroom', 'air conditioning', 'ac']
+        query_lower = query.lower()
+        for word in important_keywords:
+            if word in query_lower:
+                topic_words.append(word)
+        
+        topic_str = ' '.join(topic_words) if topic_words else 'review'
 
         queries_to_try = [
-            # High precision: Site specific
-            f"{self.hotel_name} wifi reviews site:tripadvisor.com",
-            # Medium precision: General review sites
-            f"{self.hotel_name} {clean_query} reviews",
-            # Broad: Just the hotel and the topic
-            f"{self.hotel_name} {clean_query}"
+            # TripAdvisor specific (most likely to have detailed reviews)
+            f'"{self.hotel_name}" {topic_str} review site:tripadvisor.com',
+            # Google reviews / general
+            f'"{self.hotel_name}" {topic_str} guest review',
+            # Booking.com reviews
+            f'"{self.hotel_name}" {topic_str} site:booking.com',
+            # Broad search with quotes for exact hotel match
+            f'"{self.hotel_name}" {topic_str}',
         ]
 
         results = []
@@ -346,32 +456,43 @@ Provide:
             ddgs = DDGS()
             for search_term in queries_to_try:
                 print(f"   - Trying: {search_term}")
-                # Fetch up to 5 results per query
-                # Note: 'keywords' arg is standard, but some versions use just the first arg
-                current_results = ddgs.text(keywords=search_term, max_results=5)
-
-                if current_results:
-                    results.extend(current_results)
-                    # If we found good results (more than 2), stop trying broader queries
-                    if len(results) >= 3:
-                        break
+                # Fetch up to 8 results per query for better coverage
+                try:
+                    current_results = list(ddgs.text(search_term, max_results=8))
+                    if current_results:
+                        results.extend(current_results)
+                except Exception as e:
+                    print(f"   - Search failed: {e}")
+                    continue
 
             if not results:
                 return "Performed web search but found no results."
 
-            # 3. Format output
-            # Deduplicate by link to avoid repeating the same result
+            # 3. Format output - prioritize results with topic keywords in snippet
             seen_links = set()
-            unique_results = []
+            relevant_results = []
+            other_results = []
 
             for r in results:
-                link = r.get('href')
-                if link not in seen_links:
-                    seen_links.add(link)
-                    unique_results.append(r)
+                link = r.get('href', '')
+                body = r.get('body', '').lower()
+                
+                if link in seen_links:
+                    continue
+                seen_links.add(link)
+                
+                # Prioritize results that mention the topic in the snippet
+                has_topic = any(word in body for word in topic_words)
+                if has_topic:
+                    relevant_results.append(r)
+                else:
+                    other_results.append(r)
+
+            # Combine: relevant first, then others
+            unique_results = relevant_results[:5] + other_results[:3]
 
             output = f"=== Web Search Results ({len(unique_results)} found) ===\n\n"
-            for i, r in enumerate(unique_results[:7], 1):  # Limit to top 7
+            for i, r in enumerate(unique_results[:8], 1):
                 output += f"[{i}] Title: {r.get('title')}\n"
                 output += f"    Snippet: {r.get('body')}\n"
                 output += f"    Link: {r.get('href')}\n\n"

@@ -1,0 +1,364 @@
+"""
+LangGraph Integration Tests - Fixed Version
+
+Handles:
+- Flat project structure (no agents/ folder)
+- Network restrictions (uses Groq directly)
+"""
+
+import sys
+import os
+
+# Add project root and agents folder to path (works on Windows/Linux/Mac)
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_AGENTS_DIR = os.path.dirname(_THIS_DIR)  # agents/
+_PROJECT_ROOT = os.path.dirname(_AGENTS_DIR)  # project root
+
+sys.path.insert(0, _PROJECT_ROOT)
+sys.path.insert(0, _AGENTS_DIR)
+
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(os.path.join(_PROJECT_ROOT, '.env'))
+
+results = {"passed": 0, "failed": 0, "skipped": 0}
+
+
+def test(name):
+    def decorator(func):
+        def wrapper():
+            print(f"\n{'='*50}")
+            print(f"TEST: {name}")
+            print('='*50)
+            try:
+                func()
+                results["passed"] += 1
+                print(f"[PASS] {name}")
+            except Exception as e:
+                results["failed"] += 1
+                print(f"[FAIL] {name}")
+                print(f"   Error: {e}")
+                import traceback
+                traceback.print_exc()
+        return wrapper
+    return decorator
+
+
+# ===========================================
+# TEST 1: Core Imports (No API needed)
+# ===========================================
+@test("Import Graph State")
+def test_graph_state_import():
+    from graph_state import AgentState, ExtractedEntities, ConversationTurn
+    
+    entities = ExtractedEntities(
+        hotels=["Hotel A"],
+        metrics=["price", "rating"],
+        competitors=["Hotel B"],
+        locations=["London"],
+        topics=["wifi"]
+    )
+    
+    other = ExtractedEntities(
+        hotels=["Hotel C"],
+        metrics=["price"],
+        topics=["cleanliness"]
+    )
+    merged = entities.merge(other)
+    
+    assert "Hotel A" in merged.hotels and "Hotel C" in merged.hotels
+    assert merged.metrics.count("price") == 1  # Deduplicated
+    print(f"   [OK] Merge deduplication works")
+    print(f"   [OK] Context string:\n{merged.to_context_string()}")
+
+
+@test("Import Entity Extractor")
+def test_entity_extractor_import():
+    from entity_extractor import extract_entities_regex
+    
+    text = "How does my hotel's wifi compare to competitors in London?"
+    entities = extract_entities_regex(text)
+    
+    assert "London" in entities.locations
+    assert "competitor_analysis" in entities.topics
+    print(f"   [OK] Extracted: {entities.to_dict()}")
+
+
+@test("Import Memory Manager")
+def test_memory_manager_import():
+    from memory_manager import update_memory, get_context_for_agent
+    from graph_state import AgentState, ConversationTurn
+    
+    state = AgentState(
+        query="", selected_agent="", response="",
+        recent_turns=[], summary="", entities={},
+        hotel_id="BKG_123", hotel_name="Test Hotel",
+        city="Test City", turn_count=0
+    )
+    
+    for i in range(3):
+        turn = ConversationTurn(
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"Test content {i}"
+        )
+        state = update_memory(state, turn, llm=None)
+    
+    assert state["turn_count"] == 3
+    print(f"   [OK] Turn count: {state['turn_count']}")
+    print(f"   [OK] Context:\n{get_context_for_agent(state)}")
+
+
+# ===========================================
+# TEST 2: Groq LLM (Since Gemini is blocked)
+# ===========================================
+@test("Groq LLM Direct Test")
+def test_groq_direct():
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        raise Exception("GROQ_API_KEY not found")
+    
+    from langchain_groq import ChatGroq
+    from langchain_core.messages import HumanMessage
+    
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0,
+        api_key=groq_key
+    )
+    
+    response = llm.invoke([HumanMessage(content="Say 'test passed' and nothing else.")])
+    print(f"   [OK] Groq response: {response.content}")
+    assert len(response.content) > 0
+
+
+@test("Entity Extraction with Groq")
+def test_entity_extraction_groq():
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        raise Exception("GROQ_API_KEY not found")
+    
+    from langchain_groq import ChatGroq
+    from entity_extractor import extract_entities_llm
+    
+    # Create a mock wrapper that matches expected interface
+    class GroqWrapper:
+        def __init__(self):
+            self.llm = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0,
+                api_key=groq_key
+            )
+        def invoke(self, prompt):
+            from langchain_core.messages import HumanMessage
+            if isinstance(prompt, str):
+                return self.llm.invoke([HumanMessage(content=prompt)])
+            return self.llm.invoke(prompt)
+    
+    llm = GroqWrapper()
+    text = "Compare Malmaison London's price and rating to nearby competitors in London"
+    entities = extract_entities_llm(text, llm)
+    
+    print(f"   [OK] Extracted: {entities.to_dict()}")
+    total = len(entities.hotels) + len(entities.metrics) + len(entities.competitors) + len(entities.topics) + len(entities.locations)
+    assert total > 0, "No entities extracted"
+
+
+# ===========================================
+# TEST 3: Routing Logic (with Groq)
+# ===========================================
+@test("Routing Logic with Groq")
+def test_routing_groq():
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        raise Exception("GROQ_API_KEY not found")
+    
+    from langchain_groq import ChatGroq
+    from langchain_core.messages import HumanMessage
+    
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
+        temperature=0,
+        api_key=groq_key
+    )
+    
+    ROUTING_PROMPT = """Route this query to the appropriate agent.
+
+Available agents:
+- review_analyst: Guest feedback, sentiment, complaints (wifi, noise, cleanliness)
+- competitor_analyst: Finding competitors, nearby hotels, similarity
+- market_intel: External factors (weather, events, Google Maps)
+- benchmark_agent: Comparing metrics (price, rating), rankings
+
+Query: {query}
+
+Respond with ONLY the agent name (one of: review_analyst, competitor_analyst, market_intel, benchmark_agent):"""
+    
+    test_queries = [
+        ("What are guests saying about wifi?", "review_analyst"),
+        ("Who are my competitors?", "competitor_analyst"),
+        ("How does my price compare?", "benchmark_agent"),
+        ("Any events happening nearby?", "market_intel"),
+    ]
+    
+    correct = 0
+    for query, expected in test_queries:
+        prompt = ROUTING_PROMPT.format(query=query)
+        response = llm.invoke([HumanMessage(content=prompt)])
+        agent = response.content.strip().lower()
+        
+        match = expected in agent
+        if match:
+            correct += 1
+        status = "[OK]" if match else "[X]"
+        print(f"   {status} '{query[:35]}' -> {agent} (expected: {expected})")
+    
+    assert correct >= 3, f"Only {correct}/4 routing tests passed"
+
+
+# ===========================================
+# TEST 4: Memory Compression Logic
+# ===========================================
+@test("Memory Compression Trigger")
+def test_memory_compression():
+    from memory_manager import update_memory
+    from graph_state import AgentState, ConversationTurn, MAX_RECENT_TURNS
+    
+    state = AgentState(
+        query="", selected_agent="", response="",
+        recent_turns=[], summary="", entities={},
+        hotel_id="BKG_123", hotel_name="Test Hotel",
+        city="Test City", turn_count=0
+    )
+    
+    # Add MAX_RECENT_TURNS + 2 turns (should trigger compression if LLM available)
+    for i in range(MAX_RECENT_TURNS + 2):
+        turn = ConversationTurn(
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"Turn {i}: This is test content about hotels and reviews."
+        )
+        state = update_memory(state, turn, llm=None)  # No LLM = no compression
+    
+    print(f"   MAX_RECENT_TURNS setting: {MAX_RECENT_TURNS}")
+    print(f"   Turns added: {MAX_RECENT_TURNS + 2}")
+    print(f"   Recent turns stored: {len(state['recent_turns'])}")
+    
+    # Without LLM, all turns are kept
+    assert len(state['recent_turns']) == MAX_RECENT_TURNS + 2
+
+
+@test("Entity Merge Across Turns")
+def test_entity_merge():
+    from graph_state import ExtractedEntities
+    from memory_manager import merge_entities
+    from graph_state import AgentState
+    
+    state = AgentState(
+        query="", selected_agent="", response="",
+        recent_turns=[], summary="",
+        entities={"hotels": ["Hotel A"], "metrics": ["price"], "competitors": [], "locations": [], "topics": ["wifi"]},
+        hotel_id="BKG_123", hotel_name="Test Hotel",
+        city="Test City", turn_count=0
+    )
+    
+    new_entities = ExtractedEntities(
+        hotels=["Hotel B"],
+        metrics=["rating"],
+        topics=["wifi", "cleanliness"]  # wifi is duplicate
+    )
+    
+    merged = merge_entities(state, new_entities)
+    
+    print(f"   Original: {state['entities']}")
+    print(f"   New: {new_entities.to_dict()}")
+    print(f"   Merged: {merged}")
+    
+    assert "Hotel A" in merged["hotels"] and "Hotel B" in merged["hotels"]
+    assert merged["topics"].count("wifi") == 1  # Deduplicated
+
+
+# ===========================================
+# TEST 5: Full Integration (Simulated)
+# ===========================================
+@test("Simulated Multi-Turn Flow")
+def test_simulated_flow():
+    """Simulates the coordinator flow without actual agent execution."""
+    from graph_state import AgentState, ExtractedEntities, ConversationTurn
+    from entity_extractor import extract_entities_regex
+    from memory_manager import update_memory, get_context_for_agent, merge_entities
+    
+    # Initialize state
+    state = AgentState(
+        query="", selected_agent="", response="",
+        recent_turns=[], summary="", entities={},
+        hotel_id="BKG_177691", hotel_name="Malmaison London",
+        city="London", turn_count=0
+    )
+    
+    # --- TURN 1 ---
+    query1 = "What do guests say about wifi quality?"
+    state["query"] = query1
+    
+    # Extract entities
+    entities1 = extract_entities_regex(query1)
+    state["entities"] = merge_entities(state, entities1)
+    print(f"   Turn 1 entities: {state['entities']}")
+    
+    # Simulate routing (would be LLM in real flow)
+    state["selected_agent"] = "review_analyst"
+    state["response"] = "Based on reviews, wifi quality is generally praised..."
+    
+    # Update memory
+    state = update_memory(state, ConversationTurn(role="user", content=query1), llm=None)
+    state = update_memory(state, ConversationTurn(role="assistant", content=state["response"], agent_used="review_analyst"), llm=None)
+    
+    # --- TURN 2 ---
+    query2 = "How does that compare to competitors?"
+    state["query"] = query2
+    
+    # Extract entities (should detect competitor reference)
+    entities2 = extract_entities_regex(query2)
+    state["entities"] = merge_entities(state, entities2)
+    print(f"   Turn 2 entities: {state['entities']}")
+    
+    # Check context includes previous info
+    context = get_context_for_agent(state)
+    print(f"   Context includes 'wifi': {'wifi' in context.lower()}")
+    print(f"   Context includes 'competitor': {'competitor' in context.lower()}")
+    
+    assert "wifi" in str(state["entities"]).lower(), "Wifi entity lost between turns"
+    assert state["turn_count"] == 2, "Turn count incorrect"
+    print(f"   [OK] State persisted correctly across 2 turns")
+
+
+# ===========================================
+# RUN ALL TESTS
+# ===========================================
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("LANGGRAPH INTEGRATION TEST SUITE (Fixed)")
+    print("="*60)
+    
+    test_graph_state_import()
+    test_entity_extractor_import()
+    test_memory_manager_import()
+    test_groq_direct()
+    test_entity_extraction_groq()
+    test_routing_groq()
+    test_memory_compression()
+    test_entity_merge()
+    test_simulated_flow()
+    
+    print("\n" + "="*60)
+    print("TEST SUMMARY")
+    print("="*60)
+    print(f"[PASS] Passed:  {results['passed']}")
+    print(f"[FAIL] Failed:  {results['failed']}")
+    print(f"[WARN]  Skipped: {results['skipped']}")
+    print("="*60)
+    
+    if results['failed'] > 0:
+        sys.exit(1)
+    else:
+        print("\n[OK] All tests passed!")
+        sys.exit(0)

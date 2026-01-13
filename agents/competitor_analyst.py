@@ -55,21 +55,27 @@ class CompetitorAnalystAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         return f"""You are a Competitor Analyst for {self.hotel_name} in {self.city}.
 
-    Your job is to identify and analyze competitors.
-    You can find competitors by:
-    1. Geographic proximity (same city/area)
-    2. ML-based similarity (when available)
-    
-    When answering:
-    1. Use the appropriate tool based on the query
-    2. Provide relevant competitor details
-    3. Explain why they are competitors
-    
-    Hotel context:
-    - Hotel ID: {self.hotel_id}
-    - Hotel Name: {self.hotel_name}
-    - City: {self.city}
-    """
+STRICT RULES - NO HALLUCINATIONS:
+1. ONLY list competitors that appear EXACTLY in tool outputs.
+2. NEVER make up hotel names, ratings, or similarity scores.
+3. Quote exact data: "From [tool]: [exact data]"
+4. If no competitors found, say: "No competitors found in the database."
+
+Your job is to identify and analyze competitors.
+You can find competitors by:
+1. Geographic proximity (same city/area)
+2. ML-based similarity (when available)
+
+RESPONSE FORMAT:
+- List competitors exactly as returned by tools
+- Include source (Booking/Airbnb) and IDs when available
+- If data is incomplete, state what's missing
+
+Hotel context:
+- Hotel ID: {self.hotel_id}
+- Hotel Name: {self.hotel_name}
+- City: {self.city}
+"""
 
     def get_tools(self) -> list:
         return [
@@ -87,53 +93,81 @@ class CompetitorAnalystAgent(BaseAgent):
             k: Number of competitors to return
         """
         search_city = city or self.city
+        search_city_lower = search_city.lower()
 
-        # Search both Booking and Airbnb hotels
+        # Search with larger k to allow for filtering, use city filter in metadata
+        # Try to filter by city in metadata if available
         booking_docs = self.search_rag(
             f"hotels in {search_city}",
             namespace="booking_hotels",
-            k=k
+            k=k * 3  # Fetch more to filter
         )
 
         airbnb_docs = self.search_rag(
             f"properties in {search_city}",
             namespace="airbnb_hotels",
-            k=k
+            k=k * 3  # Fetch more to filter
         )
 
-        # Filter out own hotel
+        # Filter out own hotel AND filter by city match
         competitors = []
 
         for doc in booking_docs:
             hotel_name = doc.metadata.get("title", "")
-            if self.hotel_name.lower() not in hotel_name.lower():
+            doc_city = doc.metadata.get("city", "")
+            
+            # Skip own hotel
+            if self.hotel_name.lower() in hotel_name.lower():
+                continue
+            
+            # STRICT city filtering - must match the search city
+            # Check both metadata city field and content for city mention
+            city_match = (
+                search_city_lower in doc_city.lower() or
+                search_city_lower in doc.page_content.lower()
+            )
+            
+            if city_match:
                 competitors.append({
                     "name": hotel_name,
                     "hotel_id": doc.metadata.get("hotel_id"),
                     "source": "booking",
                     "rating": doc.metadata.get("rating"),
-                    "city": doc.metadata.get("city"),
+                    "city": doc_city or search_city,
                 })
 
         for doc in airbnb_docs:
             hotel_name = doc.metadata.get("title", "")
-            if self.hotel_name.lower() not in hotel_name.lower():
+            doc_city = doc.metadata.get("city", "") or doc.metadata.get("location", "")
+            
+            # Skip own hotel
+            if self.hotel_name.lower() in hotel_name.lower():
+                continue
+            
+            # STRICT city filtering
+            city_match = (
+                search_city_lower in doc_city.lower() or
+                search_city_lower in doc.page_content.lower()
+            )
+            
+            if city_match:
                 competitors.append({
                     "name": hotel_name,
                     "hotel_id": doc.metadata.get("hotel_id"),
                     "source": "airbnb",
                     "rating": doc.metadata.get("rating"),
-                    "city": doc.metadata.get("city"),
+                    "city": doc_city or search_city,
                 })
 
         if not competitors:
-            return f"No competitors found in {search_city}."
+            return f"No competitors found in {search_city}. The database may not have hotels in this city, or try a nearby city."
 
         output = f"=== Geographic Competitors in {search_city} ({len(competitors[:k])} found) ===\n\n"
         for i, comp in enumerate(competitors[:k], 1):
             output += f"{i}. {comp['name']}\n"
             output += f"   Source: {comp['source'].title()}\n"
             output += f"   Rating: {comp['rating']}\n"
+            output += f"   City: {comp['city']}\n"
             output += f"   ID: {comp['hotel_id']}\n\n"
 
         return output

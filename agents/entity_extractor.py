@@ -17,6 +17,7 @@ METRIC_PATTERNS = [
 ]
 
 LOCATION_PATTERNS = [
+    r"london", r"paris", r"rome", r"tokyo", r"new york", r"dubai",
     r"johor bahru", r"kuala lumpur", r"singapore", r"penang", r"langkawi",
     r"melaka", r"kota kinabalu", r"ipoh", r"george town"
 ]
@@ -122,8 +123,8 @@ def extract_entities(
 if __name__ == "__main__":
     test_texts = [
         "How does my hotel's wifi compare to competitors?",
-        "What are guests saying about cleanliness at Renaissance Johor Bahru?",
-        "Compare my price to BKG_12345 and nearby hotels in Johor Bahru",
+        "What are guests saying about cleanliness at Malmaison London?",
+        "Compare my price to BKG_12345 and nearby hotels in London",
         "Show me the rating trend",
     ]
 

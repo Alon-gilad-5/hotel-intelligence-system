@@ -55,6 +55,20 @@ def create_pinecone_index_if_not_exists(index_name: str, dimension: int = 1024):
         print(f"Index '{index_name}' already exists.")
 
 
+def clear_pinecone_namespaces(index_name: str, namespaces: list[str]):
+    """Clear all vectors from specified namespaces."""
+    pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+    index = pc.Index(index_name)
+    
+    for namespace in namespaces:
+        try:
+            print(f"  Clearing namespace '{namespace}'...")
+            index.delete(delete_all=True, namespace=namespace)
+            print(f"    [OK] {namespace} cleared")
+        except Exception as e:
+            print(f"    - {namespace}: {e}")
+
+
 def get_spark_session():
     """Initialize Spark session with memory optimizations."""
     return SparkSession.builder \
@@ -72,8 +86,14 @@ def get_spark_session():
 # BOOKING.COM PROCESSING
 # ===========================================
 
-def process_booking_hotels(df, limit: int = 5) -> list[Document]:
-    """Process Booking.com hotel data into documents."""
+def process_booking_hotels(df, limit: int = 5, city_filter: str = None) -> list[Document]:
+    """Process Booking.com hotel data into documents.
+    
+    Args:
+        df: Spark DataFrame with hotel data
+        limit: Maximum number of hotels to process
+        city_filter: If set, only include hotels from this city
+    """
     df_hotels = df.select(
         col("hotel_id"),
         col("title"),
@@ -87,7 +107,14 @@ def process_booking_hotels(df, limit: int = 5) -> list[Document]:
         "title": "Unknown Hotel",
         "city": "Unknown",
         "country": "Unknown"
-    }).limit(limit)
+    })
+    
+    # Apply city filter if specified
+    if city_filter:
+        df_hotels = df_hotels.filter(col("city") == city_filter)
+        print(f"    [City Filter] Found {df_hotels.count()} hotels in {city_filter}")
+    
+    df_hotels = df_hotels.limit(limit)
 
     rows = df_hotels.collect()
     documents = []
@@ -118,10 +145,22 @@ def process_booking_hotels(df, limit: int = 5) -> list[Document]:
     return documents
 
 
-def process_booking_reviews(df, limit: int = 5) -> list[Document]:
-    """Process Booking.com reviews into documents."""
-    # Filter to hotels with reviews, then explode
-    df_with_reviews = df.filter(col("top_reviews").isNotNull()).limit(limit)
+def process_booking_reviews(df, limit: int = 5, city_filter: str = None) -> list[Document]:
+    """Process Booking.com reviews into documents.
+    
+    Args:
+        df: Spark DataFrame with hotel data
+        limit: Maximum number of hotels to process reviews from
+        city_filter: If set, only include reviews from hotels in this city
+    """
+    # Filter to hotels with reviews
+    df_with_reviews = df.filter(col("top_reviews").isNotNull())
+    
+    # Apply city filter if specified
+    if city_filter:
+        df_with_reviews = df_with_reviews.filter(col("city") == city_filter)
+    
+    df_with_reviews = df_with_reviews.limit(limit)
 
     df_reviews = df_with_reviews.select(
         col("hotel_id"),
@@ -210,8 +249,14 @@ def parse_airbnb_reviews(reviews_str: str) -> list[str]:
     return [reviews_str] if len(reviews_str) > 20 else []
 
 
-def process_airbnb_hotels(df, limit: int = 5) -> list[Document]:
-    """Process Airbnb property data into documents."""
+def process_airbnb_hotels(df, limit: int = 5, city_filter: str = None) -> list[Document]:
+    """Process Airbnb property data into documents.
+    
+    Args:
+        df: Spark DataFrame with property data
+        limit: Maximum number of properties to process
+        city_filter: If set, only include properties from this city (matches 'location' field)
+    """
     df_properties = df.select(
         col("property_id"),
         col("name"),
@@ -229,7 +274,14 @@ def process_airbnb_hotels(df, limit: int = 5) -> list[Document]:
         "name": "Unknown Property",
         "location": "Unknown",
         "country": "Unknown"
-    }).limit(limit)
+    })
+    
+    # Apply city filter if specified (Airbnb uses 'location' field)
+    if city_filter:
+        df_properties = df_properties.filter(col("location").contains(city_filter))
+        print(f"    [City Filter] Found {df_properties.count()} Airbnb properties in {city_filter}")
+    
+    df_properties = df_properties.limit(limit)
 
     rows = df_properties.collect()
     documents = []
@@ -276,8 +328,14 @@ def process_airbnb_hotels(df, limit: int = 5) -> list[Document]:
     return documents
 
 
-def process_airbnb_reviews(df, limit: int = 5) -> list[Document]:
-    """Process Airbnb reviews into documents."""
+def process_airbnb_reviews(df, limit: int = 5, city_filter: str = None) -> list[Document]:
+    """Process Airbnb reviews into documents.
+    
+    Args:
+        df: Spark DataFrame with property data
+        limit: Maximum number of properties to process reviews from
+        city_filter: If set, only include reviews from properties in this city
+    """
     df_with_reviews = df.filter(
         (col("reviews").isNotNull()) &
         (col("reviews") != "")
@@ -288,7 +346,13 @@ def process_airbnb_reviews(df, limit: int = 5) -> list[Document]:
         col("location"),
         col("country"),
         col("reviews")
-    ).limit(limit)
+    )
+    
+    # Apply city filter if specified
+    if city_filter:
+        df_with_reviews = df_with_reviews.filter(col("location").contains(city_filter))
+    
+    df_with_reviews = df_with_reviews.limit(limit)
 
     rows = df_with_reviews.collect()
     documents = []
@@ -331,7 +395,9 @@ def run_ingestion(
         booking_path: str = "data/sampled_booking_data.parquet",
         airbnb_path: str = "data/sampled_airbnb_data.parquet",
         index_name: str = "booking-agent",
-        sample_size: int = 5
+        sample_size: int = 5,
+        city_filter: str = None,
+        clear_existing: bool = True
 ):
     """
     Main ingestion pipeline for both data sources.
@@ -341,16 +407,30 @@ def run_ingestion(
         airbnb_path: Path to Airbnb parquet file
         index_name: Pinecone index name
         sample_size: Number of rows to process from each source
+        city_filter: If set, only ingest hotels from this city
+        clear_existing: If True, clear existing data before ingesting
     """
     print("=" * 50)
     print("MULTI-SOURCE INGESTION PIPELINE")
     print("=" * 50)
+    if city_filter:
+        print(f"City Filter: {city_filter}")
+    print(f"Sample Size: {sample_size}")
 
     spark = get_spark_session()
     spark.sparkContext.setLogLevel("ERROR")
 
     # Create Pinecone index
     create_pinecone_index_if_not_exists(index_name, dimension=1024)
+    
+    # Clear existing data if requested
+    if clear_existing:
+        print("\nClearing existing Pinecone data...")
+        clear_pinecone_namespaces(
+            index_name, 
+            ["booking_hotels", "booking_reviews", "airbnb_hotels", "airbnb_reviews"]
+        )
+        time.sleep(2)  # Give Pinecone time to process deletions
 
     # Initialize embeddings
     print("\nLoading embedding model (BAAI/bge-m3)...")
@@ -372,8 +452,8 @@ def run_ingestion(
         booking_df.cache()
         print(f"[BOOKING] Total rows: {booking_df.count()}")
 
-        all_docs["booking_hotels"] = process_booking_hotels(booking_df, sample_size)
-        all_docs["booking_reviews"] = process_booking_reviews(booking_df, sample_size)
+        all_docs["booking_hotels"] = process_booking_hotels(booking_df, sample_size, city_filter)
+        all_docs["booking_reviews"] = process_booking_reviews(booking_df, sample_size, city_filter)
 
         print(f"[BOOKING] Hotels: {len(all_docs['booking_hotels'])}, Reviews: {len(all_docs['booking_reviews'])}")
     else:
@@ -388,8 +468,8 @@ def run_ingestion(
         airbnb_df.cache()
         print(f"[AIRBNB] Total rows: {airbnb_df.count()}")
 
-        all_docs["airbnb_hotels"] = process_airbnb_hotels(airbnb_df, sample_size)
-        all_docs["airbnb_reviews"] = process_airbnb_reviews(airbnb_df, sample_size)
+        all_docs["airbnb_hotels"] = process_airbnb_hotels(airbnb_df, sample_size, city_filter)
+        all_docs["airbnb_reviews"] = process_airbnb_reviews(airbnb_df, sample_size, city_filter)
 
         print(f"[AIRBNB] Hotels: {len(all_docs['airbnb_hotels'])}, Reviews: {len(all_docs['airbnb_reviews'])}")
     else:
@@ -411,7 +491,7 @@ def run_ingestion(
                 index_name=index_name,
                 namespace=namespace
             )
-            print(f"  ✓ {namespace} complete")
+            print(f"  [OK] {namespace} complete")
         else:
             print(f"\n  - {namespace}: No documents to upload")
 
@@ -434,5 +514,7 @@ if __name__ == "__main__":
         booking_path="data/sampled_booking_data.parquet",
         airbnb_path="data/sampled_airbnb_data.parquet",
         index_name="booking-agent",
-        sample_size=5
+        sample_size=500,  # Get all London hotels (332 in booking)
+        city_filter="London",
+        clear_existing=True
     )

@@ -84,12 +84,22 @@ class AgentState(TypedDict):
     - recent_turns: Last N turns verbatim (default 4)
     - summary: Compressed summary of older turns
     - entities: Extracted entities across all turns
+    
+    Multi-agent collaboration:
+    - agent_queue: Sequential list of agents to execute
+    - intermediate_results: Results from each agent in chain
+    - agents_executed: Track which agents have run
     """
     # Current query
     query: str
 
     # Routing decision
     selected_agent: str
+    
+    # Multi-agent workflow support
+    agent_queue: list[str]  # Queue of agents to execute sequentially
+    intermediate_results: list[dict]  # Results from each agent in chain
+    agents_executed: list[str]  # Track which agents have run
 
     # Agent response
     response: str

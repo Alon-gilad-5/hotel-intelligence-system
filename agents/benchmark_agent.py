@@ -25,20 +25,26 @@ class BenchmarkAgent(BaseAgent):
     def get_system_prompt(self) -> str:
         return f"""You are a Benchmark Analyst for {self.hotel_name} in {self.city}.
 
+STRICT RULES - NO HALLUCINATIONS:
+1. ONLY report numbers/metrics that appear EXACTLY in tool outputs.
+2. NEVER make up prices, ratings, or rankings.
+3. If a metric is "N/A" in tool output, report it as "N/A" - don't estimate.
+4. Quote exact values: "Rating: 8.5 (from tool output)"
+
 Your job is to compare hotel metrics against competitors.
 Users can ask about ANY metric in free text - interpret their intent.
+
+RESPONSE FORMAT:
+- Use exact numbers from tool outputs
+- Clearly label the source of each metric
+- If comparison not possible (missing data), explain what's missing
+- Rankings must be based on actual data, not assumptions
 
 Examples of questions you handle:
 - "How does my price compare to competitors?"
 - "Am I rated higher than nearby hotels?"
 - "Do competitors have better amenities?"
 - "What's my position in the market?"
-
-When answering:
-1. Identify what metric(s) the user wants to compare
-2. Use tools to gather data from your hotel and competitors
-3. Present a clear comparison with specific numbers
-4. Provide actionable insights
 
 Hotel context:
 - Hotel ID: {self.hotel_id}
@@ -230,6 +236,8 @@ Metric:"""
 
         # 1. Try Structured Metadata First
         metadata = doc.metadata if hasattr(doc, 'metadata') else {}
+        content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
+        import re
 
         # Check Rating in Metadata
         if metric == "rating":
@@ -240,32 +248,85 @@ Metric:"""
                     return {"value": float(val), "raw": str(val)}
                 except (ValueError, TypeError):
                     pass
-
-        # Check Price in Metadata (Assuming ingestion puts 'price' in metadata)
-        elif metric == "price":
-            val = metadata.get("price")
-            if val is not None:
-                try:
-                    # Clean currency symbols if stored as string "$100"
-                    clean_val = str(val).replace("$", "").replace(",", "")
-                    return {"value": float(clean_val), "raw": str(val)}
-                except (ValueError, TypeError):
-                    pass
-
-        # 2. Fallback to Content Extraction (Regex) if Metadata fails
-        content = doc.page_content if hasattr(doc, 'page_content') else str(doc)
-        import re
-
-        if metric == "rating":
-            # Pattern for "Rating: 8.5" or "Score: 9"
+            # Fallback: Regex
             match = re.search(r'(?:Rating|Score|Stars)[:\s]+(\d+\.?\d*)', content, re.IGNORECASE)
             if match:
                 return {"value": float(match.group(1)), "raw": match.group(1)}
 
+        # Check Price in Metadata
         elif metric == "price":
-            # Pattern for "Price: 150" or "$150"
+            val = metadata.get("price")
+            if val is not None:
+                try:
+                    clean_val = str(val).replace("$", "").replace(",", "")
+                    return {"value": float(clean_val), "raw": str(val)}
+                except (ValueError, TypeError):
+                    pass
+            # Fallback: Regex
             match = re.search(r'(?:Price|Rate|Cost)[:\s]+[\$MYR\s]*(\d+(?:[.,]\d{2})?)', content, re.IGNORECASE)
             if match:
                 return {"value": float(match.group(1).replace(',', '')), "raw": f"${match.group(1)}"}
+
+        # Check Cleanliness in Metadata (Booking.com has category scores)
+        elif metric == "cleanliness":
+            # Try metadata fields
+            val = metadata.get("cleanliness") or metadata.get("cleanliness_score") or metadata.get("clean")
+            if val is not None:
+                try:
+                    return {"value": float(val), "raw": str(val)}
+                except (ValueError, TypeError):
+                    pass
+            # Fallback: Regex patterns for cleanliness scores
+            patterns = [
+                r'Cleanliness[:\s]+(\d+\.?\d*)',
+                r'Clean(?:liness)?[:\s]*(\d+\.?\d*)\s*(?:/\s*10)?',
+                r'(?:Room|Hotel)\s+Clean(?:liness)?[:\s]+(\d+\.?\d*)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    return {"value": float(match.group(1)), "raw": match.group(1)}
+            # Try to find cleanliness mentions in text (qualitative)
+            if re.search(r'\b(?:very\s+)?clean\b', content, re.IGNORECASE):
+                return {"value": None, "raw": "Mentioned positively"}
+            if re.search(r'\b(?:not\s+)?(?:clean|dirty)\b', content, re.IGNORECASE):
+                return {"value": None, "raw": "Mentioned negatively"}
+
+        # Check Location score
+        elif metric == "location":
+            val = metadata.get("location") or metadata.get("location_score")
+            if val is not None:
+                try:
+                    return {"value": float(val), "raw": str(val)}
+                except (ValueError, TypeError):
+                    pass
+            match = re.search(r'Location[:\s]+(\d+\.?\d*)', content, re.IGNORECASE)
+            if match:
+                return {"value": float(match.group(1)), "raw": match.group(1)}
+
+        # Check Amenities/Facilities (count-based)
+        elif metric == "amenities":
+            # Try to count amenities mentioned
+            amenity_keywords = ['wifi', 'pool', 'gym', 'spa', 'parking', 'breakfast', 'restaurant', 
+                               'bar', 'room service', 'air conditioning', 'laundry', 'concierge']
+            found = []
+            content_lower = content.lower()
+            for kw in amenity_keywords:
+                if kw in content_lower:
+                    found.append(kw)
+            if found:
+                return {"value": len(found), "raw": f"{len(found)} amenities: {', '.join(found[:5])}"}
+
+        # Check Review count
+        elif metric == "reviews":
+            val = metadata.get("review_count") or metadata.get("number_of_reviews")
+            if val is not None:
+                try:
+                    return {"value": int(val), "raw": str(val)}
+                except (ValueError, TypeError):
+                    pass
+            match = re.search(r'(\d+)\s*reviews?', content, re.IGNORECASE)
+            if match:
+                return {"value": int(match.group(1)), "raw": match.group(1)}
 
         return {"value": None, "raw": "N/A"}

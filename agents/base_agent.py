@@ -3,16 +3,25 @@ Base Agent Class
 
 Shared functionality for all specialist agents.
 Includes LLM fallback: Gemini (Primary) → Groq/Llama-3 (Fallback)
+Includes output validation to catch hallucinations.
 """
 
 import os
 from abc import ABC, abstractmethod
+from typing import Optional
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
 
 load_dotenv()
+
+# Import validator (optional - graceful fallback if not available)
+try:
+    from agents.utils.output_validator import validate_response, OutputValidator
+    VALIDATION_AVAILABLE = True
+except ImportError:
+    VALIDATION_AVAILABLE = False
 
 # Configuration
 INDEX_NAME = "booking-agent"
@@ -82,7 +91,7 @@ class LLMWithFallback:
         except Exception as e:
             error_str = str(e).lower()
             if any(x in error_str for x in ["quota", "429", "resource", "exhausted", "overloaded"]):
-                print(f"[LLM] ⚠️ Gemini quota hit! Switching to {FALLBACK_MODEL}...")
+                print(f"[LLM] WARNING: Gemini quota hit! Switching to {FALLBACK_MODEL}...")
                 self._using_fallback = True
                 self._init_fallback()
                 return self._fallback.invoke(messages)  # Retry immediately with fallback
@@ -126,7 +135,7 @@ class BoundLLMWithFallback:
         except Exception as e:
             error_str = str(e).lower()
             if any(x in error_str for x in ["quota", "429", "resource", "exhausted"]):
-                print(f"[LLM] ⚠️ Gemini quota hit (during tool call)! Switching to {FALLBACK_MODEL}...")
+                print(f"[LLM] WARNING: Gemini quota hit (during tool call)! Switching to {FALLBACK_MODEL}...")
                 self.wrapper._using_fallback = True
                 return self._get_fallback_bound().invoke(input)
             raise e
@@ -142,7 +151,14 @@ class BoundLLMWithFallback:
 class BaseAgent(ABC):
     """Base class for all specialist agents."""
 
-    def __init__(self, hotel_id: str, hotel_name: str, city: str):
+    def __init__(
+        self, 
+        hotel_id: str, 
+        hotel_name: str, 
+        city: str,
+        validate_output: bool = True,
+        strict_validation: bool = False
+    ):
         self.hotel_id = hotel_id
         self.hotel_name = hotel_name
         self.city = city
@@ -152,6 +168,11 @@ class BaseAgent(ABC):
 
         # Embeddings (lazy load)
         self._embeddings = None
+        
+        # Validation settings
+        self.validate_output = validate_output and VALIDATION_AVAILABLE
+        self.strict_validation = strict_validation
+        self._tool_outputs: list = []  # Collect tool outputs for validation
 
     @property
     def embeddings(self):
@@ -187,9 +208,21 @@ class BaseAgent(ABC):
     def get_tools(self) -> list:
         pass
 
-    def run(self, query: str) -> str:
-        """Execute the agent with multi-turn tool execution loop."""
+    def run(self, query: str, return_validation: bool = False) -> str:
+        """
+        Execute the agent with multi-turn tool execution loop.
+        
+        Args:
+            query: User query to process
+            return_validation: If True and validation enabled, returns (response, validation_result)
+            
+        Returns:
+            Response string, or tuple of (response, validation) if return_validation=True
+        """
         tools = self.get_tools()
+        
+        # Reset tool outputs for this run
+        self._tool_outputs = []
 
         # Bind tools (works for both Gemini AND Groq)
         if tools:
@@ -203,7 +236,7 @@ class BaseAgent(ABC):
         ]
 
         # Max turns to prevent infinite loops
-        MAX_ITERATIONS = 5
+        MAX_ITERATIONS = 8
         iteration = 0
 
         while iteration < MAX_ITERATIONS:
@@ -215,7 +248,8 @@ class BaseAgent(ABC):
 
             # Check if the model wants to stop (no tools called)
             if not response.tool_calls:
-                return response.content
+                final_response = response.content
+                return self._finalize_response(final_response, return_validation)
 
             # Handle Tool Calls
             tool_map = {t.__name__: t for t in tools}
@@ -223,7 +257,7 @@ class BaseAgent(ABC):
             for tool_call in response.tool_calls:
                 fn_name = tool_call["name"]
                 args = tool_call["args"]
-                print(f"[{self.__class__.__name__}] 🛠️ Tool: {fn_name}")
+                print(f"[{self.__class__.__name__}] TOOL: {fn_name}")
 
                 if fn_name in tool_map:
                     try:
@@ -234,8 +268,46 @@ class BaseAgent(ABC):
                     result = f"Unknown tool: {fn_name}"
 
                 print(f"   >>> Tool Output ({fn_name}): {str(result)[:100]}...")
+                
+                # Collect tool output for validation
+                self._tool_outputs.append(str(result))
 
                 # Append tool result to history so the model sees it
                 messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
 
-        return "Agent stopped after max iterations."
+        return self._finalize_response("Agent stopped after max iterations.", return_validation)
+    
+    def _finalize_response(self, response: str, return_validation: bool = False):
+        """
+        Finalize response with optional validation.
+        
+        Args:
+            response: The agent's final response
+            return_validation: Whether to return validation result
+            
+        Returns:
+            Response string or (response, validation_result) tuple
+        """
+        validation_result = None
+        
+        if self.validate_output and self._tool_outputs:
+            validation_result = validate_response(
+                response, 
+                self._tool_outputs,
+                strict=self.strict_validation
+            )
+            
+            # Log validation warnings
+            if validation_result.warnings:
+                print(f"[{self.__class__.__name__}] VALIDATION WARNINGS:")
+                for w in validation_result.warnings[:3]:
+                    print(f"   ⚠ {w}")
+                print(f"   Hallucination Risk: {validation_result.hallucination_risk:.0%}")
+            
+            # In strict mode, append warning to response if high risk
+            if self.strict_validation and validation_result.hallucination_risk > 0.3:
+                response += "\n\n⚠️ Note: This response may contain unverified claims. Please verify against source data."
+        
+        if return_validation and validation_result:
+            return response, validation_result
+        return response
