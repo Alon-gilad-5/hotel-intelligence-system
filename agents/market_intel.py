@@ -9,6 +9,10 @@ import os
 import urllib.parse
 from typing import Optional
 from agents.base_agent import BaseAgent
+from agents.utils.google_maps_scraper import (
+    scrape_google_maps_business as _scrape_gmaps_business,
+    format_business_for_agent
+)
 
 
 class MarketIntelAgent(BaseAgent):
@@ -46,108 +50,35 @@ Hotel context:
 
     def get_tools(self) -> list:
         return [
-            self.scrape_google_maps_reviews,
+            self.scrape_google_maps_business,  # Business data (no review text)
             self.search_events_free,
             self.search_web_brightdata,
         ]
 
-    def scrape_google_maps_reviews(self, query: Optional[str] = None) -> str:
+    def scrape_google_maps_business(self, query: Optional[str] = None, include_nearby: bool = True) -> str:
         """
-        Scrape Google Maps reviews using Playwright (FREE).
-
+        Scrape Google Maps business data for market intelligence.
+        
+        Purpose: Extract business metadata, ratings, and local context.
+        Does NOT include review text (use Review Analyst for that).
+        
         Args:
             query: Hotel name to search. Defaults to this hotel.
+            include_nearby: Whether to extract nearby POIs (default: True)
+        
+        Returns:
+            Formatted string with rating, review count, address, hours,
+            category, contact info, and nearby POIs.
         """
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return "Error: Playwright not installed. Run: pip install playwright && playwright install chromium"
-
         search_query = query or self.hotel_name
-        encoded_query = urllib.parse.quote(search_query)
-        url = f"https://www.google.com/maps/search/{encoded_query}"
-
-        print(f"[MarketIntel] Scraping Google Maps: {search_query}")
-
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
-                    locale="en-US"
-                )
-                page = context.new_page()
-
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-                # Handle cookie consent
-                try:
-                    accept_btn = page.locator('button:has-text("Accept all")').first
-                    if accept_btn.is_visible(timeout=2000):
-                        accept_btn.click()
-                        page.wait_for_timeout(1000)
-                except:
-                    pass
-
-                page.wait_for_timeout(3000)
-
-                # Click first result
-                try:
-                    first_result = page.locator('a[href*="maps/place"]').first
-                    if first_result.is_visible(timeout=3000):
-                        first_result.click()
-                        page.wait_for_timeout(2000)
-                except:
-                    pass
-
-                # Click Reviews tab
-                try:
-                    for selector in ['button[aria-label*="Reviews"]', 'button:has-text("Reviews")']:
-                        tab = page.locator(selector).first
-                        if tab.is_visible(timeout=1000):
-                            tab.click()
-                            page.wait_for_timeout(2000)
-                            break
-                except:
-                    pass
-
-                # Extract data
-                result = {"hotel": search_query, "rating": "", "reviews": []}
-
-                # Get rating
-                try:
-                    rating_elem = page.locator('div.fontDisplayLarge').first
-                    if rating_elem.is_visible(timeout=2000):
-                        result["rating"] = rating_elem.inner_text().strip()
-                except:
-                    pass
-
-                # Get reviews
-                try:
-                    review_elements = page.locator('span.wiI7pd').all()
-                    for elem in review_elements[:8]:
-                        text = elem.inner_text().strip()
-                        if len(text) > 20:
-                            result["reviews"].append(text[:500])
-                except:
-                    pass
-
-                browser.close()
-
-                # Format output
-                output = f"=== Google Maps Data for {result['hotel']} ===\n"
-                if result["rating"]:
-                    output += f"Rating: {result['rating']}\n"
-                output += f"\n--- Reviews ({len(result['reviews'])} found) ---\n\n"
-
-                for i, review in enumerate(result["reviews"], 1):
-                    output += f"[{i}] {review}\n\n"
-
-                return output if result["reviews"] else "No reviews found on Google Maps."
-
-        except Exception as e:
-            return f"Playwright error: {e}"
+        
+        print(f"[MarketIntel] Scraping Google Maps business data: {search_query}")
+        
+        # Use shared scraper (business metadata only, no review text)
+        result = _scrape_gmaps_business(search_query, include_nearby=include_nearby)
+        
+        # Format for agent output
+        return format_business_for_agent(result)
 
     def search_events_free(self, city: Optional[str] = None, date: Optional[str] = None) -> str:
         """

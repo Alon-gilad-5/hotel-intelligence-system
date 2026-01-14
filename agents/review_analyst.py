@@ -9,6 +9,10 @@ import urllib.parse
 from typing import Optional
 from agents.base_agent import BaseAgent
 from agents.utils.bright_data import search_google_serp, format_serp_results
+from agents.utils.google_maps_scraper import (
+    scrape_google_maps_reviews as _scrape_gmaps_reviews,
+    format_reviews_for_agent
+)
 
 
 class ReviewAnalystAgent(BaseAgent):
@@ -187,97 +191,31 @@ Provide:
         response = self.llm.invoke(analysis_prompt)
         return response.content
 
-    def scrape_google_maps_reviews(self, query: Optional[str] = None) -> str:
+    def scrape_google_maps_reviews(self, query: Optional[str] = None, max_reviews: int = 10) -> str:
         """
-        Scrape LIVE Google Maps reviews using Playwright.
+        Scrape LIVE Google Maps reviews for sentiment analysis.
+        
+        Purpose: Extract guest review TEXT for sentiment analysis.
         Use this if internal database searches fail.
-        Note: Always searches for hotel name to find the place, topic is used for context only.
+        
+        Args:
+            query: Optional topic to note (hotel name is always used for search)
+            max_reviews: Maximum number of reviews to extract (default: 10)
+        
+        Returns:
+            Formatted string with review text, ratings, and dates
         """
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return "Error: Playwright not installed. Run: pip install playwright && playwright install chromium"
-
-        # Always search for hotel name to find the correct place
+        max_reviews = int(max_reviews)  # Coerce in case LLM passes string
         search_query = self.hotel_name
         topic = query  # Keep track of what we're looking for
-        # Build the Google Maps URL
-        url = f"https://www.google.com/maps/search/{urllib.parse.quote(search_query)}"
-        print(f"[ReviewAnalyst] Scraping Google Maps: {search_query} (looking for: {topic})...")
-
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-
-                # 1. Navigate to Search Results
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-                # Reject Cookies (common in EU regions)
-                try:
-                    page.get_by_role("button", name="Reject all").click(timeout=3000)
-                except:
-                    pass
-
-                # 2. Click the first result (usually the hotel/place)
-                try:
-                    page.locator("a[href*='/maps/place/']").first.click(timeout=5000)
-                    page.wait_for_timeout(3000)
-                except:
-                    # We might already be on the place page
-                    pass
-
-                # 3. Click "Reviews" Tab (Robust Logic)
-                clicked_reviews = False
-                # Try finding the tab by text name
-                for name in ["Reviews", "Reviews", "Opinions"]:
-                    try:
-                        page.get_by_role("tab", name=name).click(timeout=2000)
-                        clicked_reviews = True
-                        break
-                    except:
-                        continue
-
-                if not clicked_reviews:
-                    # Fallback: try aria-label or button
-                    try:
-                        page.locator('button[aria-label*="Reviews"]').click(timeout=2000)
-                    except:
-                        pass
-
-                page.wait_for_timeout(3000)
-
-                # 4. Extract Review Text
-                reviews = []
-
-                # Try the new Google Maps class for review body
-                elements = page.locator('div[class*="fontBodyMedium"]').all()
-
-                if not elements:
-                    # Fallback to the older known class
-                    elements = page.locator('span.wiI7pd').all()
-
-                for i, elem in enumerate(elements[:8]):
-                    try:
-                        text = elem.inner_text().strip()
-                        if len(text) > 20:
-                            reviews.append(text)
-                    except:
-                        pass
-
-                browser.close()
-
-                if not reviews:
-                    return "Found the place on Maps, but could not extract review text (CSS selectors might have changed)."
-
-                output = f"=== LIVE Google Maps Reviews for {search_query} ===\n\n"
-                for i, r in enumerate(reviews, 1):
-                    output += f"[{i}] {r}\n\n"
-
-                return output
-
-        except Exception as e:
-            return f"Playwright error: {e}"
+        
+        print(f"[ReviewAnalyst] Scraping Google Maps reviews: {search_query} (topic: {topic})...")
+        
+        # Use shared scraper
+        result = _scrape_gmaps_reviews(search_query, max_reviews=max_reviews)
+        
+        # Format for agent output
+        return format_reviews_for_agent(result)
 
 
     def scrape_tripadvisor_reviews(self, query: Optional[str] = None) -> str:
