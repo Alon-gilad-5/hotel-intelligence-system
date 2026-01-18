@@ -12,7 +12,6 @@ from typing import Optional
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
-import os
 
 # Handle imports whether run from project root or agents directory
 try:

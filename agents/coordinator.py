@@ -42,35 +42,64 @@ class LangGraphCoordinator:
 
     ROUTING_PROMPT = """Route this query to the appropriate agent(s).
 
-SINGLE-AGENT PATTERNS (USE THESE FOR SIMPLE QUESTIONS - respond with just ONE agent):
-- Guest feedback/reviews/cleanliness/service for MY hotel → review_analyst
-- "What do guests think about X?" (about MY hotel) → review_analyst
-- Who are my competitors / find similar hotels → competitor_analyst
-- Events, weather, external factors → market_intel
-- Price/rating rankings → benchmark_agent
+    SINGLE-AGENT PATTERNS:
+    - Guest feedback/reviews for MY hotel (no comparison) → review_analyst
+    - "What do guests say about X?" (MY hotel only) → review_analyst
+    - Compare reviews vs neighbors / competitor review analysis → competitor_analyst (uses NLP tool)
+    - "How do my reviews compare?" / "What are my weaknesses?" → competitor_analyst
+    - Feature impact / "Why is my rating X?" / "How to improve rating?" → benchmark_agent (uses LR tool)
+    - Simple ranking "Rank hotels by X" → benchmark_agent
+    - Events, weather, external factors → market_intel
 
-MULTI-AGENT PATTERNS (ONLY use when query explicitly mentions COMPARING with competitors):
-- "Compare MY hotel with competitors on X" → competitor_analyst, review_analyst, benchmark_agent
-- "How do competitors rate on X?" → competitor_analyst, benchmark_agent
-- Find competitors then analyze them → competitor_analyst, benchmark_agent
+    MULTI-AGENT PATTERNS (rare):
+    - "Full competitive analysis" → competitor_analyst, benchmark_agent
+    - "Compare everything with competitors" → competitor_analyst, benchmark_agent
 
-CRITICAL ROUTING RULES:
-1. Questions about MY hotel's reviews/feedback/cleanliness/service → ONLY review_analyst (NO competitor_analyst)
-2. ONLY use competitor_analyst when query explicitly mentions "competitors", "compare", or "other hotels"
-3. If unsure, use SINGLE agent - don't over-route
+    CRITICAL ROUTING RULES:
+    1. Questions about MY hotel reviews only (no comparison) → review_analyst
+    2. Questions COMPARING with neighbors/competitors → competitor_analyst (NLP tool)
+    3. Questions about FEATURE IMPACT or WHY rating differs → benchmark_agent (LR tool)
+    4. Simple metric rankings → benchmark_agent (rank_by_metric)
+    5. If unsure, use SINGLE agent
 
-Available agents:
-- review_analyst: Guest feedback, sentiment, complaints for THIS hotel
-- competitor_analyst: ONLY for finding/identifying competitors, nearby hotels
-- market_intel: External factors (weather, events, Google Maps data)
-- benchmark_agent: COMPARING metrics when competitors are already identified
+    Available agents:
+    - review_analyst: Guest feedback for THIS hotel only (RAG search)
+    - competitor_analyst: Compare reviews vs neighbors, find similar hotels (NLP tool)
+    - benchmark_agent: Feature impact analysis, rankings (LR tool)
+    - market_intel: External factors (weather, events, Google Maps)
 
-Context from conversation:
-{context}
+    Context from conversation:
+    {context}
 
-Current Query: {query}
+    Current Query: {query}
 
-Respond with agent name(s). For questions about MY hotel only, respond with just ONE agent:"""
+    Respond with agent name(s):"""
+
+    ROUTING_EXAMPLES = """
+    Query: "What do guests say about wifi?"
+    → review_analyst (single hotel, no comparison)
+
+    Query: "How do my reviews compare to neighbors?"
+    → competitor_analyst (comparison, uses NLP tool)
+
+    Query: "What are my weaknesses vs competition?"
+    → competitor_analyst (comparison, uses NLP tool)
+
+    Query: "Why is my rating lower than competitors?"
+    → benchmark_agent (feature impact, uses LR tool)
+
+    Query: "How can I improve my rating?"
+    → benchmark_agent (feature impact, uses LR tool)
+
+    Query: "Rank hotels by price"
+    → benchmark_agent (simple ranking)
+
+    Query: "Are there events this weekend?"
+    → market_intel
+
+    Query: "Give me a full competitive analysis"
+    → competitor_analyst, benchmark_agent (multi-agent)
+    """
 
     def __init__(self, hotel_id: str, hotel_name: str, city: str):
         self.hotel_id = hotel_id
@@ -176,10 +205,25 @@ Respond with agent name(s). For questions about MY hotel only, respond with just
         }
 
     def _execute_agent_node(self, state: AgentState) -> AgentState:
-        """Node: Execute the currently selected agent."""
+        """Node: Execute the currently selected agent with support for long-running Databricks jobs."""
+        import time
+        import threading
+        import sys
+        
         agent_name = state["selected_agent"]
         agent = self.agents[agent_name]
         query = state["query"]
+        
+        # Databricks job timeout configuration (in seconds)
+        # NLP and LR tools take ~15 minutes each
+        DATABRICKS_TIMEOUTS = {
+            "competitor_analyst": 1080,   # 18 min (NLP tool takes ~15 min + buffer)
+            "benchmark_agent": 1080,      # 18 min (LR tool takes ~15 min + buffer)
+        }
+        
+        # Check if this agent might use Databricks tools (long-running)
+        is_databricks_job = agent_name in DATABRICKS_TIMEOUTS
+        timeout = DATABRICKS_TIMEOUTS.get(agent_name, 300)  # Default 5 min
         
         # Build context including results from previous agents in chain
         context_parts = []
@@ -202,10 +246,56 @@ Respond with agent name(s). For questions about MY hotel only, respond with just
         else:
             enhanced_query = query
 
-        print(f"[{agent_name}] Executing...")
+        # Inform user about long-running jobs
+        if is_databricks_job:
+            print(f"[{agent_name}] Starting Databricks analysis (takes ~15 minutes)...")
+            print(f"[{agent_name}] Timeout set to {timeout // 60} minutes")
+        else:
+            print(f"[{agent_name}] Executing...")
         
-        # Run agent
-        response = agent.run(enhanced_query)
+        # Run agent with progress indicator for long jobs
+        start_time = time.time()
+        response = None
+        error_msg = None
+        
+        try:
+            if is_databricks_job:
+                # Progress indicator in background
+                stop_progress = threading.Event()
+                
+                def show_progress():
+                    while not stop_progress.is_set():
+                        elapsed = int(time.time() - start_time)
+                        mins, secs = divmod(elapsed, 60)
+                        sys.stdout.write(f"\r[{agent_name}] Running... {mins}m {secs}s ")
+                        sys.stdout.flush()
+                        stop_progress.wait(timeout=5)  # Update every 5 seconds
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                
+                progress_thread = threading.Thread(target=show_progress, daemon=True)
+                progress_thread.start()
+                
+                try:
+                    response = agent.run(enhanced_query)
+                finally:
+                    stop_progress.set()
+                    progress_thread.join(timeout=1)
+            else:
+                response = agent.run(enhanced_query)
+                
+        except TimeoutError as e:
+            error_msg = f"Databricks job timed out after {timeout // 60} minutes. The analysis may still be running in the background."
+        except Exception as e:
+            error_msg = f"Agent execution failed: {str(e)}"
+        
+        elapsed = time.time() - start_time
+        print(f"[{agent_name}] Completed in {elapsed:.1f}s")
+        
+        # Handle errors gracefully
+        if error_msg:
+            response = f"⚠️ {error_msg}\n\nPlease try again or use a simpler query."
+            print(f"[{agent_name}] Error: {error_msg}")
 
         # Extract entities from response
         response_entities = extract_entities(response, use_llm=False)
@@ -214,7 +304,8 @@ Respond with agent name(s). For questions about MY hotel only, respond with just
         # Store this agent's result
         new_intermediate = intermediate + [{
             "agent": agent_name,
-            "response": response
+            "response": response,
+            "elapsed_seconds": elapsed
         }]
         
         # Track executed agents
