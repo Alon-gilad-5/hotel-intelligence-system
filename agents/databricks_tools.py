@@ -86,19 +86,24 @@ def save_chart_to_filestore(b64_data: str, filename: str, property_id: str) -> O
     import os
     
     try:
-        # Get dbutils (only available in Databricks)
+        # Get dbutils from notebook namespace (Databricks injects it as a global)
         try:
-            from pyspark.dbutils import DBUtils
-            from pyspark.sql import SparkSession
-            spark = SparkSession.builder.getOrCreate()
-            dbutils = DBUtils(spark)
-        except ImportError:
-            # Try getting from globals (set by Databricks runtime)
-            import builtins
-            dbutils = getattr(builtins, 'dbutils', None)
-            if dbutils is None:
-                print("[Chart] dbutils not available - cannot save to FileStore")
-                return None
+            # Method 1: Get from global namespace (works when module is imported in notebook)
+            import sys
+            if 'dbutils' in dir(sys.modules.get('__main__', {})):
+                dbutils = getattr(sys.modules['__main__'], 'dbutils')
+            else:
+                # Method 2: Get from IPython namespace (Databricks uses IPython)
+                from IPython import get_ipython
+                ip = get_ipython()
+                if ip and 'dbutils' in ip.user_ns:
+                    dbutils = ip.user_ns['dbutils']
+                else:
+                    print("[Chart] dbutils not available - cannot save to FileStore")
+                    return None
+        except Exception as e:
+            print(f"[Chart] Failed to get dbutils: {e}")
+            return None
         
         # Decode base64 to bytes
         img_bytes = base64.b64decode(b64_data)
@@ -125,6 +130,7 @@ def save_chart_to_filestore(b64_data: str, filename: str, property_id: str) -> O
         
         # Get workspace URL for constructing the file URL
         try:
+            from pyspark.sql import SparkSession
             spark = SparkSession.builder.getOrCreate()
             workspace_url = spark.conf.get("spark.databricks.workspaceUrl")
         except:
