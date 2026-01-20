@@ -114,9 +114,6 @@ Hotel context:
         Args:
             top_n: Number of top insights to return
             
-        Returns:
-            Formatted feature impact analysis
-            
         Note: This analysis takes ~15 minutes to complete.
         """
         if not DATABRICKS_AVAILABLE:
@@ -144,9 +141,6 @@ Hotel context:
         Args:
             metric: Metric to rank by (rating, price, reviews)
             k: Number of hotels to include
-            
-        Returns:
-            Ranked list of hotels
         """
         k = int(k)
         print(f"[Benchmark] Ranking by: {metric}")

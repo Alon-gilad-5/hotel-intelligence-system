@@ -129,9 +129,6 @@ Hotel context:
         Args:
             include_evidence: Whether to include example review sentences
             
-        Returns:
-            Formatted analysis results
-            
         Note: This analysis takes 5-10 minutes to complete.
         """
         if not DATABRICKS_AVAILABLE:
@@ -166,9 +163,6 @@ Hotel context:
         Args:
             topic: Topic to get evidence for (e.g., "wifi and internet quality")
             limit: Max number of evidence items
-            
-        Returns:
-            Evidence sentences with sentiment labels
         """
         if not DATABRICKS_AVAILABLE:
             return "Evidence retrieval not available."
@@ -198,9 +192,6 @@ Hotel context:
         Args:
             city: City to search in (defaults to hotel's city)
             k: Number of competitors to return
-            
-        Returns:
-            List of competitors with basic info
         """
         k = int(k)
         search_city = city or self.city
@@ -240,9 +231,6 @@ Hotel context:
         
         Args:
             hotel_id: Competitor's hotel ID
-            
-        Returns:
-            Detailed competitor information
         """
         # Determine namespace
         if hotel_id.startswith("BKG_"):
