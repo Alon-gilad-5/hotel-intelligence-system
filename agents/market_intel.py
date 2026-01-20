@@ -424,37 +424,67 @@ Hotel context:
         results = [f"=== Weather for {city} ===\n"]
         
         if isinstance(data, dict):
-            # Google weather widget often in answer_box
-            if "answer_box" in data:
+            # BrightData weather widget format (primary)
+            if "weather" in data:
+                w = data["weather"]
+                
+                # Temperature
+                temp = w.get('temperature', w.get('temp', 'N/A'))
+                results.append(f"Temperature: {temp}")
+                
+                # Conditions from subtitles (BrightData format) or description
+                subtitles = w.get('subtitles', [])
+                if len(subtitles) > 1:
+                    results.append(f"Conditions: {subtitles[1]}")
+                elif w.get('description'):
+                    results.append(f"Conditions: {w['description']}")
+                elif w.get('conditions'):
+                    results.append(f"Conditions: {w['conditions']}")
+                
+                # Additional info (humidity, wind, precipitation - BrightData format)
+                for info in w.get('additional_info', []):
+                    info_type = info.get('type', '')
+                    info_text = info.get('text', '')
+                    if info_type and info_text:
+                        results.append(f"{info_type}: {info_text}")
+                
+                # Fallback to direct keys (older format)
+                if not w.get('additional_info'):
+                    if "humidity" in w:
+                        results.append(f"Humidity: {w['humidity']}")
+                    if "wind" in w:
+                        results.append(f"Wind: {w['wind']}")
+                
+                # Daily forecast
+                if w.get('daily_forecast'):
+                    results.append(f"\nForecast ({days} days):")
+                    for day in w['daily_forecast'][:days]:
+                        day_name = day.get('day', '')
+                        temps = day.get('temperature', {})
+                        high = temps.get('daytime', 'N/A')
+                        low = temps.get('nighttime', 'N/A')
+                        results.append(f"  {day_name}: High {high}°C, Low {low}°C")
+            
+            # Google answer_box fallback
+            elif "answer_box" in data:
                 ab = data["answer_box"]
                 if "answer" in ab:
                     results.append(ab["answer"])
                 elif "snippet" in ab:
                     results.append(ab["snippet"])
             
-            # Dedicated weather section
-            if "weather" in data:
-                w = data["weather"]
-                results.append(f"Temperature: {w.get('temperature', w.get('temp', 'N/A'))}")
-                results.append(f"Conditions: {w.get('description', w.get('conditions', 'N/A'))}")
-                if "humidity" in w:
-                    results.append(f"Humidity: {w['humidity']}")
-                if "wind" in w:
-                    results.append(f"Wind: {w['wind']}")
-            
-            # Knowledge graph might have weather
-            if "knowledge_graph" in data and len(results) == 1:
+            # Knowledge graph fallback
+            elif "knowledge_graph" in data:
                 kg = data["knowledge_graph"]
                 if kg.get("description"):
                     results.append(kg["description"][:300])
             
-            # Fallback to organic results
+            # Organic results fallback
             if len(results) == 1 and "organic" in data:
                 results.append("From weather websites:")
                 for item in data["organic"][:3]:
                     title = item.get("title", "")
                     snippet = item.get("description", item.get("snippet", ""))[:200]
-                    # Look for temperature patterns
                     if "°" in snippet or "weather" in title.lower():
                         results.append(f"• {title}")
                         results.append(f"  {snippet}\n")
