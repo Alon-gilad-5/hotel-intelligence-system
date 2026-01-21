@@ -278,7 +278,99 @@ def test_entity_merge():
 
 
 # ===========================================
-# TEST 5: Full Integration (Simulated)
+# TEST 5: Robust Routing Parser
+# ===========================================
+@test("Robust Routing Parser")
+def test_routing_parser():
+    """Test that routing parser extracts agent names from verbose responses."""
+    from coordinator import LangGraphCoordinator
+    
+    # Create coordinator just to access the parser
+    coord = LangGraphCoordinator("BKG_123", "Test Hotel", "London")
+    
+    # Test cases: (raw_response, expected_agents)
+    test_cases = [
+        # Simple case
+        ("review_analyst", ["review_analyst"]),
+        # Multi-agent
+        ("competitor_analyst, benchmark_agent", ["competitor_analyst", "benchmark_agent"]),
+        # Verbose explanation (this was failing before)
+        ("Based on the routing rules, I would route this query to the benchmark_agent because it handles feature impact analysis.", ["benchmark_agent"]),
+        # Multiple agents in verbose text
+        ("I recommend using competitor_analyst first, then benchmark_agent for a full analysis.", ["competitor_analyst", "benchmark_agent"]),
+        # Random garbage (should return empty)
+        ("I don't know what to do", []),
+        # Newline separated
+        ("review_analyst\nmarket_intel", ["review_analyst", "market_intel"]),
+    ]
+    
+    correct = 0
+    for raw, expected in test_cases:
+        result = coord._extract_agent_names(raw)
+        match = result == expected
+        if match:
+            correct += 1
+        status = "[OK]" if match else "[X]"
+        print(f"   {status} '{raw[:50]}...' -> {result} (expected: {expected})")
+    
+    assert correct >= 5, f"Only {correct}/{len(test_cases)} routing parser tests passed"
+
+
+# ===========================================
+# TEST 6: Malformed Tool Call Recovery
+# ===========================================
+@test("Malformed Tool Call Recovery")
+def test_tool_call_recovery():
+    """Test parsing of malformed Groq tool calls."""
+    from base_agent import BaseAgent
+    
+    # Create a minimal concrete subclass to test the parser
+    class TestAgent(BaseAgent):
+        def get_system_prompt(self): return "test"
+        def get_tools(self): return []
+    
+    agent = TestAgent("BKG_123", "Test Hotel", "London")
+    
+    # Mock tool map
+    tool_map = {
+        "search_booking_reviews": lambda **k: "mock",
+        "find_competitors_geo": lambda **k: "mock",
+    }
+    
+    # Test cases: (malformed_content, expected_tool_count)
+    test_cases = [
+        # Standard malformed format
+        ('<function=search_booking_reviews {"query": "wifi", "k": 10}</function>', 1),
+        # With closing tag variation
+        ('<function=search_booking_reviews {"query": "wifi", "k": "5"}</function>', 1),
+        # Multiple tools
+        ('<function=search_booking_reviews {"query": "wifi", "k": 10}</function>\n<function=find_competitors_geo {"city": "London"}</function>', 2),
+        # Unknown tool (should be ignored)
+        ('<function=unknown_tool {"arg": "val"}</function>', 0),
+        # No tool call
+        ("Just some regular text", 0),
+    ]
+    
+    correct = 0
+    for content, expected_count in test_cases:
+        parsed = agent._parse_malformed_tool_calls(content, tool_map)
+        match = len(parsed) == expected_count
+        if match:
+            correct += 1
+        status = "[OK]" if match else "[X]"
+        print(f"   {status} '{content[:40]}...' -> {len(parsed)} tools (expected: {expected_count})")
+        
+        # Also verify arg normalization (string "5" -> int 5)
+        if parsed and "k" in parsed[0].get("args", {}):
+            k_val = parsed[0]["args"]["k"]
+            if isinstance(k_val, int):
+                print(f"       [OK] k normalized to int: {k_val}")
+    
+    assert correct >= 4, f"Only {correct}/{len(test_cases)} tool recovery tests passed"
+
+
+# ===========================================
+# TEST 7: Full Integration (Simulated)
 # ===========================================
 @test("Simulated Multi-Turn Flow")
 def test_simulated_flow():
@@ -347,6 +439,8 @@ if __name__ == "__main__":
     test_routing_groq()
     test_memory_compression()
     test_entity_merge()
+    test_routing_parser()
+    test_tool_call_recovery()
     test_simulated_flow()
     
     print("\n" + "="*60)

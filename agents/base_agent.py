@@ -41,6 +41,10 @@ EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_MODEL = "llama-3.3-70b-versatile"
 FALLBACK_MODEL_2 = "llama-3.1-8b-instant"  # Secondary fallback when Llama hits rate limit
 
+# Token budget limits for Groq free tier (6000 TPM)
+MAX_TOOL_OUTPUT_CHARS = 2000  # Truncate tool outputs to ~500 tokens
+MAX_CONTEXT_CHARS = 1500  # Truncate conversation context
+
 class LLMWithFallback:
     """
     Wrapper that automatically falls back to Groq on Gemini quota errors.
@@ -274,6 +278,82 @@ class BaseAgent(ABC):
     def get_tools(self) -> list:
         pass
 
+    def _parse_malformed_tool_calls(self, content: str, tool_map: dict) -> list:
+        """
+        Parse malformed tool calls from Groq/Llama that output:
+        <function=tool_name {"arg": "value"}</function>
+        or <function=tool_name>{"arg": "value"}</function>
+        
+        Returns list of parsed tool calls: [{"name": str, "args": dict, "id": str}]
+        """
+        import re
+        import json
+        import uuid
+        
+        parsed = []
+        
+        # Pattern 1: <function=tool_name {"args"}</function>
+        # Pattern 2: <function=tool_name>{"args"}</function>
+        patterns = [
+            r'<function=(\w+)\s*(\{[^}]+\})\s*(?:</function>|<function>)?',
+            r'<function=(\w+)>\s*(\{[^}]+\})\s*</function>',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches:
+                fn_name = match[0]
+                args_str = match[1]
+                
+                # Only process if tool exists
+                if fn_name not in tool_map:
+                    continue
+                
+                try:
+                    args = json.loads(args_str)
+                    # Normalize args: convert string numbers to int where needed
+                    for key, val in args.items():
+                        if isinstance(val, str) and val.isdigit():
+                            args[key] = int(val)
+                    
+                    parsed.append({
+                        "name": fn_name,
+                        "args": args,
+                        "id": f"manual_{uuid.uuid4().hex[:8]}"
+                    })
+                except json.JSONDecodeError:
+                    print(f"[ToolRecovery] Failed to parse args for {fn_name}: {args_str[:50]}")
+                    continue
+        
+        return parsed
+
+    def _coerce_tool_args(self, args: dict) -> dict:
+        """
+        Coerce tool arguments to correct types.
+        Prevents schema validation errors like 'expected integer, but got string'.
+        """
+        if not args:
+            return args
+        
+        coerced = {}
+        for key, val in args.items():
+            if isinstance(val, str):
+                # Try to convert numeric strings to int
+                if val.isdigit():
+                    coerced[key] = int(val)
+                # Try to convert float strings
+                elif val.replace('.', '', 1).isdigit() and val.count('.') == 1:
+                    coerced[key] = float(val)
+                # Try to convert boolean strings
+                elif val.lower() in ('true', 'false'):
+                    coerced[key] = val.lower() == 'true'
+                else:
+                    coerced[key] = val
+            else:
+                coerced[key] = val
+        
+        return coerced
+
     def run(self, query: str, return_validation: bool = False) -> str:
         """
         Execute the agent with multi-turn tool execution loop.
@@ -304,6 +384,9 @@ class BaseAgent(ABC):
         # Max turns to prevent infinite loops
         MAX_ITERATIONS = 8
         iteration = 0
+        
+        # Build tool map once
+        tool_map = {t.__name__: t for t in tools} if tools else {}
 
         while iteration < MAX_ITERATIONS:
             iteration += 1
@@ -311,18 +394,29 @@ class BaseAgent(ABC):
             # Invoke LLM
             response = llm_with_tools.invoke(messages)
             messages.append(response)
+            
+            # Get tool calls - either from proper response or parse malformed ones
+            tool_calls = response.tool_calls if response.tool_calls else []
+            
+            # If no proper tool calls, try to recover from malformed format
+            if not tool_calls and response.content and "<function=" in response.content:
+                tool_calls = self._parse_malformed_tool_calls(response.content, tool_map)
+                if tool_calls:
+                    print(f"[ToolRecovery] Recovered {len(tool_calls)} tool call(s) from malformed format")
 
             # Check if the model wants to stop (no tools called)
-            if not response.tool_calls:
+            if not tool_calls:
                 final_response = response.content
                 return self._finalize_response(final_response, return_validation)
 
             # Handle Tool Calls
-            tool_map = {t.__name__: t for t in tools}
-
-            for tool_call in response.tool_calls:
+            for tool_call in tool_calls:
                 fn_name = tool_call["name"]
                 args = tool_call["args"]
+                
+                # Coerce numeric string args to integers (prevents schema validation errors)
+                args = self._coerce_tool_args(args)
+                
                 print(f"[{self.__class__.__name__}] TOOL: {fn_name}")
 
                 if fn_name in tool_map:
@@ -333,13 +427,20 @@ class BaseAgent(ABC):
                 else:
                     result = f"Unknown tool: {fn_name}"
 
-                print(f"   >>> Tool Output ({fn_name}): {str(result)[:100]}...")
+                result_str = str(result)
+                print(f"   >>> Tool Output ({fn_name}): {result_str[:100]}...")
                 
-                # Collect tool output for validation
-                self._tool_outputs.append(str(result))
+                # Collect full tool output for validation
+                self._tool_outputs.append(result_str)
+                
+                # Truncate tool output to avoid token overflow on Groq
+                if len(result_str) > MAX_TOOL_OUTPUT_CHARS:
+                    truncated = result_str[:MAX_TOOL_OUTPUT_CHARS] + f"\n... [truncated {len(result_str) - MAX_TOOL_OUTPUT_CHARS} chars]"
+                else:
+                    truncated = result_str
 
                 # Append tool result to history so the model sees it
-                messages.append(ToolMessage(content=str(result), tool_call_id=tool_call["id"]))
+                messages.append(ToolMessage(content=truncated, tool_call_id=tool_call["id"]))
 
         return self._finalize_response("Agent stopped after max iterations.", return_validation)
     

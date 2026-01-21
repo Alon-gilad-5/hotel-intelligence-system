@@ -40,40 +40,29 @@ class LangGraphCoordinator:
     Supports sequential execution of multiple agents for complex queries.
     """
 
+    # Valid agent IDs for routing
+    VALID_AGENTS = {"review_analyst", "competitor_analyst", "benchmark_agent", "market_intel"}
+
     ROUTING_PROMPT = """Route this query to the appropriate agent(s).
 
-    SINGLE-AGENT PATTERNS:
-    - Guest feedback/reviews for MY hotel (no comparison) → review_analyst
-    - "What do guests say about X?" (MY hotel only) → review_analyst
-    - Compare reviews vs neighbors / competitor review analysis → competitor_analyst (uses NLP tool)
-    - "How do my reviews compare?" / "What are my weaknesses?" → competitor_analyst
-    - Feature impact / "Why is my rating X?" / "How to improve rating?" → benchmark_agent (uses LR tool)
-    - Simple ranking "Rank hotels by X" → benchmark_agent
-    - Events, weather, external factors → market_intel
+ROUTING RULES:
+- Guest feedback/reviews for MY hotel only → review_analyst
+- Compare with neighbors/competitors → competitor_analyst
+- Feature impact / "Why is my rating X?" / rankings → benchmark_agent
+- Events, weather, attractions, external factors → market_intel
+- "Full competitive analysis" → competitor_analyst, benchmark_agent
 
-    MULTI-AGENT PATTERNS (rare):
-    - "Full competitive analysis" → competitor_analyst, benchmark_agent
-    - "Compare everything with competitors" → competitor_analyst, benchmark_agent
+Available: review_analyst, competitor_analyst, benchmark_agent, market_intel
 
-    CRITICAL ROUTING RULES:
-    1. Questions about MY hotel reviews only (no comparison) → review_analyst
-    2. Questions COMPARING with neighbors/competitors → competitor_analyst (NLP tool)
-    3. Questions about FEATURE IMPACT or WHY rating differs → benchmark_agent (LR tool)
-    4. Simple metric rankings → benchmark_agent (rank_by_metric)
-    5. If unsure, use SINGLE agent
+Context: {context}
+Query: {query}
 
-    Available agents:
-    - review_analyst: Guest feedback for THIS hotel only (RAG search)
-    - competitor_analyst: Compare reviews vs neighbors, find similar hotels (NLP tool)
-    - benchmark_agent: Feature impact analysis, rankings (LR tool)
-    - market_intel: External factors (weather, events, Google Maps)
+RESPOND WITH ONLY agent names separated by commas. NO explanation. Examples:
+- review_analyst
+- competitor_analyst, benchmark_agent
+- market_intel
 
-    Context from conversation:
-    {context}
-
-    Current Query: {query}
-
-    Respond with agent name(s):"""
+Your answer:"""
 
     ROUTING_EXAMPLES = """
     Query: "What do guests say about wifi?"
@@ -168,23 +157,57 @@ class LangGraphCoordinator:
 
         return {**state, "entities": merged}
 
+    def _extract_agent_names(self, raw_response: str) -> list:
+        """
+        Robustly extract agent names from LLM response.
+        Handles verbose explanations by scanning for valid agent IDs.
+        """
+        text = raw_response.lower()
+        found = []
+        
+        # First try: simple comma/newline split (ideal case)
+        candidates = [a.strip() for a in text.replace("\n", ",").split(",")]
+        for c in candidates:
+            if c in self.VALID_AGENTS:
+                found.append(c)
+        
+        if found:
+            return found
+        
+        # Second try: scan text for any valid agent name mentions
+        # This handles verbose responses like "I would route to benchmark_agent"
+        for agent in self.VALID_AGENTS:
+            if agent in text:
+                found.append(agent)
+        
+        # Preserve order of appearance in text
+        if found:
+            positions = [(text.index(a), a) for a in found]
+            positions.sort()
+            return [a for _, a in positions]
+        
+        return []
+
     def _route_node(self, state: AgentState) -> AgentState:
         """Node: Route to appropriate agent(s) - supports multi-agent chains."""
         query = state["query"]
         context = get_context_for_agent(state)
+        
+        # Truncate context to avoid token overflow
+        if len(context) > 500:
+            context = context[:500] + "..."
 
         prompt = self.ROUTING_PROMPT.format(context=context, query=query)
 
         response = self.llm.invoke([HumanMessage(content=prompt)])
-        raw_response = response.content.strip().lower()
+        raw_response = response.content.strip()
         
-        # Parse potentially multiple agents
-        agent_names = [a.strip() for a in raw_response.replace("\n", ",").split(",")]
-        agent_names = [a for a in agent_names if a in self.agents]
+        # Robust extraction of agent names
+        agent_names = self._extract_agent_names(raw_response)
         
         # Fallback if nothing valid
         if not agent_names:
-            print(f"[Graph] Invalid routing '{raw_response}', defaulting to review_analyst")
+            print(f"[Graph] Invalid routing '{raw_response[:100]}...', defaulting to review_analyst")
             agent_names = ["review_analyst"]
 
         # First agent goes to selected_agent, rest go to queue
@@ -225,26 +248,40 @@ class LangGraphCoordinator:
         is_databricks_job = agent_name in DATABRICKS_TIMEOUTS
         timeout = DATABRICKS_TIMEOUTS.get(agent_name, 300)  # Default 5 min
         
+        # Token budget limits for context
+        MAX_CONV_CONTEXT = 800
+        MAX_INTERMEDIATE_RESULT = 1000
+        MAX_ENHANCED_QUERY = 3000
+        
         # Build context including results from previous agents in chain
         context_parts = []
         
-        # Add conversation context
+        # Add conversation context (truncated)
         conv_context = get_context_for_agent(state)
         if conv_context:
+            if len(conv_context) > MAX_CONV_CONTEXT:
+                conv_context = conv_context[:MAX_CONV_CONTEXT] + "..."
             context_parts.append(f"[Conversation Context]\n{conv_context}")
         
-        # Add intermediate results from previous agents in this chain
+        # Add intermediate results from previous agents in this chain (truncated)
         intermediate = state.get("intermediate_results", [])
         if intermediate:
             context_parts.append("[Results from Previous Agents]")
             for result in intermediate:
-                context_parts.append(f"\n--- {result['agent']} ---\n{result['response'][:1500]}")
+                resp = result['response'][:MAX_INTERMEDIATE_RESULT]
+                if len(result['response']) > MAX_INTERMEDIATE_RESULT:
+                    resp += "..."
+                context_parts.append(f"\n--- {result['agent']} ---\n{resp}")
         
         # Build enhanced query
         if context_parts:
             enhanced_query = "\n\n".join(context_parts) + f"\n\n[Current Question]\n{query}"
         else:
             enhanced_query = query
+        
+        # Final truncation to keep total under budget
+        if len(enhanced_query) > MAX_ENHANCED_QUERY:
+            enhanced_query = enhanced_query[:MAX_ENHANCED_QUERY] + "\n... [context truncated]"
 
         # Inform user about long-running jobs
         if is_databricks_job:
