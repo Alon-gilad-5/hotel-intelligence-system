@@ -506,9 +506,27 @@ class BaseAgent(ABC):
                     print(f"   ⚠ {w}")
                 print(f"   Hallucination Risk: {validation_result.hallucination_risk:.0%}")
             
-            # In strict mode, append warning to response if high risk
+            # In strict mode, reject response if hallucination risk is too high
             if self.strict_validation and validation_result.hallucination_risk > 0.3:
-                response += "\n\n⚠️ Note: This response may contain unverified claims. Please verify against source data."
+                # Replace response with safe admission of insufficient data
+                response = f"""I searched for information but couldn't find reliable data to answer your question accurately.
+
+**What I searched:**
+- Internal review database
+- Web search engines
+
+**What I found:**
+- Limited or no specific information about your query
+
+**Recommendations:**
+1. Try asking about a different aspect of your property
+2. Check if there are reviews in your database
+3. Consider gathering more guest feedback
+
+To avoid providing inaccurate information, I'm being conservative here. If you'd like, I can share the search snippets I found, but they don't contain enough detail for a confident analysis.
+
+[Validation: High hallucination risk ({validation_result.hallucination_risk:.0%}) - response blocked for accuracy]
+"""
         
         if return_validation and validation_result:
             return response, validation_result
