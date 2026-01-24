@@ -76,8 +76,9 @@ def get_spark_session():
         .master("local[*]") \
         .config("spark.ui.showConsoleProgress", "false") \
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
-        .config("spark.driver.memory", "4g") \
-        .config("spark.executor.memory", "4g") \
+        .config("spark.driver.memory", "1g") \
+        .config("spark.executor.memory", "1g") \
+        .config("spark.driver.maxResultSize", "512m") \
         .config("spark.sql.parquet.enableVectorizedReader", "false") \
         .getOrCreate()
 
@@ -509,12 +510,141 @@ def run_ingestion(
     spark.stop()
 
 
+def upload_airbnb_to_new_index(
+    airbnb_path: str = "data/airbnb_sampled_three_cities.parquet",
+    index_name: str = "airbnb-index",
+    sample_size: int = 1000,
+    city_filter: str = None
+):
+    """
+    Upload Airbnb properties to a new Pinecone index.
+    
+    Creates "airbnb-index" if it doesn't exist and uploads properties using Spark.
+    This is separate from the main ingestion pipeline and doesn't affect existing indexes.
+    
+    Args:
+        airbnb_path: Path to Airbnb parquet file
+        index_name: Pinecone index name (default: "airbnb-index")
+        sample_size: Number of properties to upload
+        city_filter: If set, only include properties from this city
+    """
+    print("=" * 60)
+    print("UPLOADING AIRBNB PROPERTIES TO NEW INDEX")
+    print("=" * 60)
+    print(f"Index: {index_name}")
+    print(f"Source: {airbnb_path}")
+    print(f"Sample Size: {sample_size}")
+    if city_filter:
+        print(f"City Filter: {city_filter}")
+    print("=" * 60)
+    
+    # Create Spark session
+    spark = get_spark_session()
+    spark.sparkContext.setLogLevel("ERROR")
+    
+    # Create Pinecone index
+    create_pinecone_index_if_not_exists(index_name, dimension=1024)
+    
+    # Initialize embeddings
+    print("\nLoading embedding model (BAAI/bge-m3)...")
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+    
+    # Process Airbnb data
+    documents = []
+    
+    if os.path.exists(airbnb_path):
+        print(f"\n[AIRBNB] Loading from {airbnb_path}...")
+        airbnb_df = spark.read.parquet(airbnb_path)
+        airbnb_df.cache()
+        print(f"[AIRBNB] Total rows: {airbnb_df.count()}")
+        
+        documents = process_airbnb_hotels(airbnb_df, sample_size, city_filter)
+        print(f"[AIRBNB] Processed {len(documents)} properties")
+    else:
+        print(f"\n[AIRBNB] File not found: {airbnb_path}")
+        spark.stop()
+        return
+    
+    # Upload to Pinecone in batches to avoid memory issues
+    if documents:
+        print("\n" + "=" * 60)
+        print("UPLOADING TO PINECONE")
+        print("=" * 60)
+        
+        # Smaller batch size for embedding (5 at a time to avoid memory issues)
+        embed_batch_size = 5
+        total_docs = len(documents)
+        total_batches = (total_docs + embed_batch_size - 1) // embed_batch_size
+        
+        print(f"\nUpserting {total_docs} properties in {total_batches} batches (batch size: {embed_batch_size})...")
+        print(f"Index: '{index_name}', Namespace: 'airbnb_hotels'")
+        
+        try:
+            # Initialize Pinecone connection
+            pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+            index = pc.Index(index_name)
+            
+            # Process in small batches: embed then upload
+            for i in range(0, total_docs, embed_batch_size):
+                batch = documents[i:i + embed_batch_size]
+                batch_num = (i // embed_batch_size) + 1
+                print(f"  Batch {batch_num}/{total_batches}: Processing {len(batch)} documents...", end=" ", flush=True)
+                
+                # Embed this small batch
+                texts = [doc.page_content for doc in batch]
+                batch_embeddings = embeddings.embed_documents(texts)
+                
+                # Prepare vectors for upload
+                vectors_to_upsert = []
+                for j, doc in enumerate(batch):
+                    # Use hotel_id as the vector ID, or generate one from metadata
+                    vector_id = doc.metadata.get('hotel_id', f"doc_{i+j}")
+                    # Include text in metadata for LangChain retrieval
+                    metadata_with_text = {**doc.metadata, "text": doc.page_content}
+                    vectors_to_upsert.append({
+                        "id": vector_id,
+                        "values": batch_embeddings[j],
+                        "metadata": metadata_with_text
+                    })
+                
+                # Upload to Pinecone
+                index.upsert(vectors=vectors_to_upsert, namespace="airbnb_hotels")
+                print("[OK]")
+            
+            print(f"\n  [OK] All {total_docs} documents uploaded successfully!")
+        except Exception as e:
+            print(f"\n  [ERROR] Upload failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+    else:
+        print("\nNo documents to upload")
+    
+    print("\n" + "=" * 60)
+    print("UPLOAD COMPLETE")
+    print("=" * 60)
+    print(f"Uploaded {len(documents)} properties to index '{index_name}'")
+    print(f"Namespace: airbnb_hotels")
+    print("=" * 60)
+    
+    spark.stop()
+
+
 if __name__ == "__main__":
-    run_ingestion(
-        booking_path="data/sampled_booking_data.parquet",
-        airbnb_path="data/sampled_airbnb_data.parquet",
-        index_name="booking-agent",
-        sample_size=500,  # Get all London hotels (332 in booking)
-        city_filter="London",
-        clear_existing=True
+    # Option 1: Upload Airbnb properties to new "airbnb-index"
+    upload_airbnb_to_new_index(
+        airbnb_path="data/airbnb_sampled_three_cities.parquet",
+        index_name="airbnb-index",
+        sample_size=100,  # Start with 100 properties to avoid memory issues
+        city_filter="Broadbeach"  # Focus on Broadbeach first to get ABB_40458495
     )
+    
+    # Option 2: Run full ingestion to "booking-agent" index (commented out)
+    # run_ingestion(
+    #     booking_path="data/sampled_booking_data.parquet",
+    #     airbnb_path="data/airbnb_sampled_three_cities.parquet",
+    #     index_name="booking-agent",
+    #     sample_size=5000,  # Ingest 5000 rows from each source
+    #     city_filter=None,  # Include all three cities
+    #     clear_existing=True
+    # )
