@@ -450,6 +450,17 @@ Based on the analysis, here are the features to improve...
                         
                         if tool_calls:
                             print(f"[ToolRecovery] Recovered {len(tool_calls)} tool call(s) from API error")
+                            # Add synthetic AIMessage so LLM knows it already called these tools
+                            # This prevents duplicate tool calls on the next iteration
+                            synthetic_ai_msg = AIMessage(
+                                content="",
+                                tool_calls=[{
+                                    "name": tc["name"],
+                                    "args": tc["args"],
+                                    "id": tc.get("id", f"recovered_{tc['name']}")
+                                } for tc in tool_calls]
+                            )
+                            messages.append(synthetic_ai_msg)
                         else:
                             # Could not recover, raise the error
                             raise RuntimeError(f"Tool call failed and could not recover: {error_str[:200]}")
