@@ -509,11 +509,9 @@ Based on the analysis, here are the features to improve...
                     truncated = result_str
 
                 # Append tool result to history so the model sees it
-                # Use HumanMessage if recovered from API error (no proper tool_call chain)
-                if recovered_from_api_error:
-                    messages.append(HumanMessage(content=f"Tool '{fn_name}' returned:\n{truncated}"))
-                else:
-                    messages.append(ToolMessage(content=truncated, tool_call_id=tool_call["id"]))
+                # Always use ToolMessage with the tool_call ID to complete the chain
+                # (Even when recovered from API error, we added a synthetic AIMessage with matching tool_call IDs)
+                messages.append(ToolMessage(content=truncated, tool_call_id=tool_call["id"]))
 
         return self._finalize_response("Agent stopped after max iterations.", return_validation)
     
