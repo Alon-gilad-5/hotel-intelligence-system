@@ -46,7 +46,7 @@ LR_NOTEBOOK_PATH = _resolve_notebook_path(
     #"/Workspace/Users/rborenstein@campus.technion.ac.il/(Clone) (Alon Clone) linear regression"
     #"/Workspace/Users/alon-gilad@campus.technion.ac.il/(Alon Clone) linear regression"
     #"/Workspace/Shared/(Clone) (Alon Clone) linear regression"
-    "/Workspace/Shared/(Clone) (Clone) (Clone) linear regression"
+    "/Workspace/Shared/Linear Regression Model"
 )
 
 # Data paths
