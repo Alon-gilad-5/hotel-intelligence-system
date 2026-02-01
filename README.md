@@ -340,8 +340,8 @@ dbutils.library.restartPython()
    GOOGLE_API_KEY=your_gemini_api_key
    GROQ_API_KEY=your_groq_api_key
    BRIGHTDATA_API_TOKEN=your_brightdata_token
-   DATABRICKS_NLP_NOTEBOOK_PATH=/Workspace/Users/you@example.com/(Clone) NLP Tool For Review Analysis
-   DATABRICKS_LR_NOTEBOOK_PATH=/Workspace/Users/you@example.com/(Alon Clone) linear regression
+   DATABRICKS_NLP_NOTEBOOK_PATH=/Workspace/Users/you@example.com/NLP Tool For Review Analysis
+   DATABRICKS_LR_NOTEBOOK_PATH=/Workspace/Users/you@example.com/Linear Regression Model
    ```
    
    ![Environment Variables Step 3](images/Env_Var_step3.png)
