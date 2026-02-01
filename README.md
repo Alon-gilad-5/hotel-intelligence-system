@@ -403,6 +403,30 @@ Without these notebooks, the NLP and LR tools will fail.
 
 Note: For `CompetitorAnalystAgent`, the geo-based competitor search is fallback-only and is used only when the NLP tool is unavailable or fails.
 
+### Step 5.5: Backup Notebook (Optional - For Testing and Troubleshooting)
+
+In addition to the main project, we've created a backup notebook for convenience and unit testing of the tools. This notebook allows you to:
+
+- Test the NLP and Linear Regression tools independently
+- Run the tools with custom questions and properties
+- Get faster answers without using the full UI interface
+- Visualize tool outputs and understand the tool flow
+
+**Location**: `Databricks_Backup_Notebook/Agent Tools Demonstration.ipynb`
+
+**When to Use**:
+- If the main interface notebook (`UI Hotel Intelligence System.ipynb`) doesn't work or encounters issues
+- For unit testing and debugging individual tools
+- To understand the tool flow and visualizations without the full system
+- For faster iteration when testing specific tool functionality
+
+**How to Use**:
+1. Import the notebook from the repo: `Databricks_Backup_Notebook/Agent Tools Demonstration.ipynb`
+2. Follow the instructions inside the notebook to provide a property and question
+3. Run the notebook cells step by step to receive LLM-generated insights
+
+**Note**: This backup notebook is optional and provided solely for those who wish to see the overall tool flow and visualizations independently. The main interface notebook should be used for the full system experience.
+
 ### Step 6: Use the Interface Notebook
 
 1. **Open the existing interface notebook**:
