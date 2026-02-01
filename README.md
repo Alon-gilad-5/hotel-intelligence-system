@@ -262,7 +262,7 @@ The system is designed to run on **Databricks**, which provides:
    ![Integration Step 2](images/Integration_step2.png)
 
 4. **Verify Repository**:
-   - The repo will appear under `/Workspace/Users/<your-email>/hotel-intelligence-system`
+   - The repo URL is `https://github.com/Alon-gilad-5/hotel-intelligence-system`
    - You should see the project structure with `agents/`, `tests/`, `docs/`, etc.
    
    ![Integration Step 3](images/Integration_step3.png)
@@ -389,14 +389,14 @@ If you are on the same workspace as us (`lab94290w3`), the two notebooks are alr
 
 1. **Import the notebooks from the repo**:
    - `agents/Databricks_Notebooks_Tools/NLP Tool.ipynb`
-   - `agents/Databricks_Notebooks_Tools/Linear Regression Tool.ipynb`
+   - `agents/Databricks_Notebooks_Tools/Linear Regression Model.ipynb`
 
 2. **Place them in the same workspace as your main notebook**.
 
 3. **If your notebook paths differ, set these env vars**:
    ```
    DATABRICKS_NLP_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/NLP Tool
-   DATABRICKS_LR_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/Linear Regression Tool
+   DATABRICKS_LR_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/Linear Regression Model
    ```
 
 Without these notebooks, the NLP and LR tools will fail.
@@ -413,13 +413,7 @@ Note: For `CompetitorAnalystAgent`, the geo-based competitor search is fallback-
 
 3. **Simply run the notebook cells** in order to start the interface.
 
-4. **Update Import Paths** (if needed):
-   ```python
-   import sys
-   REPO_PATH = "/Workspace/Users/<your-email>/hotel-intelligence-system"
-   sys.path.insert(0, REPO_PATH)
-   sys.path.insert(0, f"{REPO_PATH}/agents")
-   ```
+**Note**: The interface notebook automatically sets up import paths using the current user's email, so no manual configuration is needed.
 
 ### Step 6: Run the Notebook
 
