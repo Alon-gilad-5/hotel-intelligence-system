@@ -105,14 +105,13 @@ class CompetitorAnalystAgent(BaseAgent):
     }
 
     def get_system_prompt(self) -> str:
-        # Build tool descriptions based on availability
-        tool_descriptions = """- find_competitors_geo: Quick search for nearby competitors
-- get_competitor_details: Details about a specific competitor"""
-        
+        # Build tool descriptions based on availability (geo tools are fallback-only)
         if DATABRICKS_AVAILABLE and is_airbnb_property(self.hotel_id):
             tool_descriptions = """- analyze_vs_neighbors: Deep NLP analysis comparing reviews across all topics (takes 5-10 min)
-""" + tool_descriptions + """
 - get_topic_evidence: Get specific review evidence for a topic - USE THIS when user asks about a specific topic!"""
+        else:
+            tool_descriptions = """- find_competitors_geo: Quick search for nearby competitors (fallback only)
+- get_competitor_details: Details about a specific competitor (fallback only)"""
         
         # List available topics for the agent
         topics_list = ", ".join([f'"{t}"' for t in self.NLP_TOPICS[:5]]) + "..."
@@ -160,17 +159,10 @@ Property: {self.hotel_name} (ID: {self.hotel_id}) in {self.city}
 """
 
     def get_tools(self) -> list:
-        tools = [
-            self.find_competitors_geo,
-            self.get_competitor_details,
-        ]
-        
-        # Add NLP tool if available
+        # Only expose geo tools when NLP tools are unavailable or unsupported.
         if DATABRICKS_AVAILABLE and is_airbnb_property(self.hotel_id):
-            tools.insert(0, self.analyze_vs_neighbors)
-            tools.append(self.get_topic_evidence)
-        
-        return tools
+            return [self.analyze_vs_neighbors, self.get_topic_evidence]
+        return [self.find_competitors_geo, self.get_competitor_details]
 
     def analyze_vs_neighbors(self, include_evidence: bool = False, focus_topic: str = None) -> str:
         """
@@ -200,7 +192,11 @@ Property: {self.hotel_name} (ID: {self.hotel_id}) in {self.city}
         result = run_nlp_analysis(self.hotel_id)
         
         if result.get("status") not in ["ok", "success"]:
-            return f"Analysis failed: {result.get('error_message', 'Unknown error')}"
+            # Fallback to geo methods when NLP tool fails
+            print("[CompetitorAnalyst] NLP tool failed; falling back to geo-based competitor search.")
+            fallback_header = "Analysis failed; falling back to geo-based competitor search."
+            geo_results = self.find_competitors_geo()
+            return f"{fallback_header}\n\n{geo_results}\n\nDetails:\n{result.get('error_message', 'Unknown error')}"
         
         # Get results from Delta tables
         raw_id = extract_raw_id(self.hotel_id)

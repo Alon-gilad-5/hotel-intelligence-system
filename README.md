@@ -250,7 +250,7 @@ The system is designed to run on **Databricks**, which provides:
 2. **Add Repository**:
    - Click **Add Repo** or **Create Repo**
    - Select **Git** as the source
-   - Enter your repository URL: `https://github.com/yourusername/hotel-intelligence-system.git`
+   - Enter my repository URL: `https://github.com/Alon-gilad-5/hotel-intelligence-system.git`
    
    ![Integration Step 1](images/Integration_step1.png)
 
@@ -381,6 +381,12 @@ dbutils.library.restartPython()
 
 The NLP and LR tools depend on Databricks notebooks that must exist in your workspace.
 
+**For Project Checkers on Workspace "lab94290w3":**
+
+If you are on the same workspace as us (`lab94290w3`), the two notebooks are already shared on the workspace. The system will automatically detect and use the shared notebooks. No additional setup is required.
+
+**For Other Workspaces:**
+
 1. **Import the notebooks from the repo**:
    - `agents/Databricks_Notebooks_Tools/NLP Tool.ipynb`
    - `agents/Databricks_Notebooks_Tools/Linear Regression Tool.ipynb`
@@ -395,27 +401,17 @@ The NLP and LR tools depend on Databricks notebooks that must exist in your work
 
 Without these notebooks, the NLP and LR tools will fail.
 
-### Step 6: Create Databricks Notebook
+Note: For `CompetitorAnalystAgent`, the geo-based competitor search is fallback-only and is used only when the NLP tool is unavailable or fails.
 
-1. **In your Repo**, create a new notebook: `Hotel_Intelligence_Agent.ipynb`
-2. **Copy the interface code** from one of these options:
+### Step 6: Use the Interface Notebook
 
-**Option A: Native Databricks Interface** (Recommended - No external dependencies)
-- Copy code from `agents/databricks_native_interface.py`
-- Uses built-in Databricks widgets and `displayHTML()`
-- Most reliable for long-running jobs
+1. **Open the existing interface notebook**:
+   - Located at: `agents/Datsabricks_Interface_Notebook/UI Hotel Intelligence System.ipynb`
+   - This notebook contains the Gradio interface ready to use
 
-**Option B: Streamlit Interface** (Better UI, requires installation)
-- First install: `%pip install streamlit`
-- Copy code from `agents/streamlit_databricks.py`
-- Run with: `%sh streamlit run <path-to-file> --server.port 8501`
+2. **No configuration needed** - The notebook is pre-configured and ready to run.
 
-3. **Update Configuration** in the notebook:
-   ```python
-   HOTEL_ID = "ABB_40458495"  # Your hotel ID
-   HOTEL_NAME = "Your Hotel Name"
-   CITY = "Your City"
-   ```
+3. **Simply run the notebook cells** in order to start the interface.
 
 4. **Update Import Paths** (if needed):
    ```python
