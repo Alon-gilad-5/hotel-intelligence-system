@@ -388,14 +388,14 @@ If you are on the same workspace as us (`lab94290w3`), the two notebooks are alr
 **For Other Workspaces:**
 
 1. **Import the notebooks from the repo**:
-   - `agents/Databricks_Notebooks_Tools/NLP Tool.ipynb`
+   - `agents/Databricks_Notebooks_Tools/NLP Tool For Review Analysis.ipynb`
    - `agents/Databricks_Notebooks_Tools/Linear Regression Model.ipynb`
 
 2. **Place them in the same workspace as your main notebook**.
 
 3. **If your notebook paths differ, set these env vars**:
    ```
-   DATABRICKS_NLP_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/NLP Tool
+   DATABRICKS_NLP_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/NLP Tool For Review Analysis
    DATABRICKS_LR_NOTEBOOK_PATH=/Workspace/Users/<you>/Databricks_Notebooks_Tools/Linear Regression Model
    ```
 
@@ -453,7 +453,7 @@ If you prefer to run locally instead of Databricks:
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/hotel-intelligence-system.git
+git clone https://github.com/Alon-gilad-5/hotel-intelligence-system.git
 cd hotel-intelligence-system
 ```
 
