@@ -18,64 +18,9 @@ from typing import Optional, Dict, Any, List
 # ===========================================
 
 # Notebook paths (env vars override; fallback to current hardcoded paths)
-def _is_shared_workspace() -> bool:
-    """
-    Check if we're on the shared workspace (lab94290w3).
-    
-    Returns:
-        True if on shared workspace, False otherwise
-    """
-    # Method 1: Check explicit environment variable
-    if os.getenv("DATABRICKS_SHARED_WORKSPACE") == "true":
-        return True
-    
-    # Method 2: Check workspace ID environment variable
-    workspace_id = os.getenv("DATABRICKS_WORKSPACE_ID", "")
-    if workspace_id == "lab94290w3":
-        return True
-    
-    # Method 3: Try to detect from Spark config
-    try:
-        from pyspark.sql import SparkSession
-        spark = SparkSession.getActiveSession()
-        if spark:
-            workspace_url = spark.conf.get("spark.databricks.workspaceUrl", "")
-            # Check if URL contains workspace identifier (workspace URLs often contain identifiers)
-            # This is a fallback - most reliable is setting DATABRICKS_SHARED_WORKSPACE=true
-            if "lab94290" in workspace_url.lower():
-                return True
-    except Exception:
-        pass
-    
-    return False
-
-
-def _resolve_notebook_path(env_var: str, fallback_path: str, shared_nlp_path: str = None, shared_lr_path: str = None) -> str:
-    """
-    Resolve notebook path with support for shared workspace notebooks.
-    
-    Priority:
-    1. Environment variable (explicit override)
-    2. Shared workspace paths (if on lab94290w3)
-    3. Fallback to hardcoded path
-    """
-    # Priority 1: Environment variable (explicit override)
+def _resolve_notebook_path(env_var: str, fallback_path: str) -> str:
     path = os.getenv(env_var)
-    if path:
-        return path
-    
-    # Priority 2: Check if we're on shared workspace (lab94290w3)
-    if _is_shared_workspace():
-        # Use shared notebook paths
-        if env_var == "DATABRICKS_NLP_NOTEBOOK_PATH" and shared_nlp_path:
-            print(f"[CONFIG] Using shared workspace NLP notebook: {shared_nlp_path}")
-            return shared_nlp_path
-        elif env_var == "DATABRICKS_LR_NOTEBOOK_PATH" and shared_lr_path:
-            print(f"[CONFIG] Using shared workspace LR notebook: {shared_lr_path}")
-            return shared_lr_path
-    
-    # Priority 3: Fallback to hardcoded path
-    return fallback_path
+    return path or fallback_path
 
 
 def _notebook_path_error(notebook_path: str, env_var: str) -> Dict[str, str]:
@@ -89,25 +34,23 @@ def _notebook_path_error(notebook_path: str, env_var: str) -> Dict[str, str]:
     }
 
 
-# Shared workspace notebook paths (for lab94290w3)
-SHARED_NLP_NOTEBOOK_PATH = "/Workspace/Shared/NLP Tool"
-SHARED_LR_NOTEBOOK_PATH = "/Workspace/Shared/Linear Regression Tool"
-
 NLP_NOTEBOOK_PATH = _resolve_notebook_path(
     "DATABRICKS_NLP_NOTEBOOK_PATH",
-    "/Workspace/Users/alon-gilad@campus.technion.ac.il/(Clone) NLP Tool For Review Analysis",
-    shared_nlp_path=SHARED_NLP_NOTEBOOK_PATH,
-    shared_lr_path=None
+    #"/Workspace/Users/rborenstein@campus.technion.ac.il/(Clone) (Clone) NLP Tool For Review Analysis"
+    #"/Workspace/Users/alon-gilad@campus.technion.ac.il/(Clone) NLP Tool For Review Analysis"
+    #"/Workspace/Shared/(Clone) (Clone) NLP Tool For Review Analysis"
+    "/Workspace/Shared/NLP Tool For Review Analysis"
 )
 LR_NOTEBOOK_PATH = _resolve_notebook_path(
     "DATABRICKS_LR_NOTEBOOK_PATH",
-    "/Workspace/Users/alon-gilad@campus.technion.ac.il/(Alon Clone) linear regression",
-    shared_nlp_path=None,
-    shared_lr_path=SHARED_LR_NOTEBOOK_PATH
+    #"/Workspace/Users/rborenstein@campus.technion.ac.il/(Clone) (Alon Clone) linear regression"
+    #"/Workspace/Users/alon-gilad@campus.technion.ac.il/(Alon Clone) linear regression"
+    #"/Workspace/Shared/(Clone) (Alon Clone) linear regression"
+    "/Workspace/Shared/Linear Regression Model"
 )
 
 # Data paths
-DELTA_PATH = "/mnt/lab94290/cluster_19/airbnb_h3_simvector"
+DELTA_PATH =  "/mnt/lab94290/cluster_19/airbnb_data_updateddd"  #"/mnt/lab94290/cluster_19/airbnb_h3_simvector"
 NLP_OUTPUT_BASE = "/mnt/lab94290/cluster_19/nlp_outputs"
 
 # FileStore path for charts (accessible via URL)
